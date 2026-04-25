@@ -30,7 +30,7 @@ The ultimate goal of Qontext is to be the brain for your AI agents.
 A premium UI built to visualize complex relationships easily.
 *   **Virtual File System (VFS):** Browse the generated markdown representations of your company data.
 *   **Interactive Context Graph:** Click any node to traverse the company knowledge graph and see exact relationship edges (`reports_to`, `manages`, etc.).
-*   **Live Search & Inspector:** Type to semantically search, click results to snap the graph to them, and inspect their provenance.
+*   **Live Search & Inspector:** Type to semantically search, click results to snap the graph to them, inspect provenance, resolve review items, and manually add/edit/delete entities and facts.
 
 ---
 
@@ -45,9 +45,9 @@ export GEMINI_API_KEY="your-api-key"
 ```
 
 ### 2. Build the Context Graph (Ingestion & Embeddings)
-This command reads the raw dataset, applies the `dataset_schema.json`, resolves simple conflicts via LLM, and generates the Semantic Search vectors:
+This command reads the raw dataset, applies the built-in extractors plus `dataset_schema.json`, resolves simple conflicts, and generates the VFS. Add `--use-llm` when `GEMINI_API_KEY` is configured and you want Gemini-assisted policy extraction, embeddings, and synonym conflict checks.
 ```bash
-python3 context_base.py build --use-llm
+python3 context_base.py build --force
 ```
 
 ### 3. Start the Backend API Server
@@ -63,6 +63,44 @@ cd ui
 npm run dev
 ```
 Open `http://localhost:5173` in your browser.
+
+## Demo Script
+
+Run a complete non-interactive demo from a clean output directory:
+
+```bash
+bash scripts/demo.sh
+```
+
+The script builds the context base, prints graph/review counts, runs a retrieval query, and shows the generated source coverage file. You can also choose a custom output directory:
+
+```bash
+bash scripts/demo.sh context_base_demo_out
+```
+
+Then start the product surfaces:
+
+```bash
+python3 context_base.py serve --out-dir context_base_demo_out
+cd ui
+npm run dev
+```
+
+## What To Inspect
+
+- `context_base_out/context.db`: SQLite graph with entities, facts, edges, source records, review items, and optional embeddings.
+- `context_base_out/vfs/company/index.md`: generated virtual file system entry point.
+- `context_base_out/vfs/company/source-coverage.md`: source coverage, stale-source health, entity counts, and facts by source.
+- React dashboard: VFS browser, graph inspector, review resolution, and manual CRUD for entities/facts.
+- `mcp_server.py`: tools for AI agents: `search_context`, `get_entity_context`, and `read_vfs_file`.
+
+## Verification
+
+```bash
+python3 -m unittest -v
+cd ui
+npm run build
+```
 
 ---
 

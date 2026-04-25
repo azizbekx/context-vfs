@@ -60,6 +60,21 @@
       ]
     },
     {
+      "path": "Customer_Relation_Management/Customer Support/customer_support_chats.json",
+      "format": "json",
+      "id_field": "chat_id",
+      "entity_type": "support_chat",
+      "summary_field": "text",
+      "path_template": "company/support-chats/{chat_id}.md",
+      "facts": [
+        {"field": "customer_id", "predicate": "customer", "entity_ref": {"prefix": "customer"}},
+        {"field": "product_id", "predicate": "product", "entity_ref": {"prefix": "product"}},
+        {"field": "emp_id", "predicate": "handled_by", "entity_ref": {"prefix": "employee"}},
+        {"field": "interaction_date", "predicate": "interaction_date"},
+        {"field": "text", "predicate": "text"}
+      ]
+    },
+    {
       "path": "IT_Service_Management/it_tickets.json",
       "format": "json",
       "id_field": "id",

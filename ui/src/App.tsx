@@ -1,10 +1,23 @@
 import React, { useState, useEffect } from 'react';
 import { 
   Folder, FileText, ChevronRight, ChevronDown, 
-  Search, Hexagon, Layers, Settings, Activity, AlertTriangle, Check
+  Search, Hexagon, Activity, AlertTriangle, Plus, Trash2, Save, X, Edit3
 } from 'lucide-react';
-import { motion, AnimatePresence } from 'framer-motion';
-import { fetchTree, fetchEntity, fetchNeighbors, fetchFile, search, fetchReviews, resolveReview } from './api';
+import { motion } from 'framer-motion';
+import {
+  fetchTree,
+  fetchEntity,
+  fetchNeighbors,
+  fetchFile,
+  search,
+  fetchReviews,
+  resolveReview,
+  createEntity,
+  addFact,
+  editFact,
+  deleteFact,
+  deleteEntity
+} from './api';
 
 // Utilities for VFS parsing
 function buildTree(paths: string[]) {
@@ -57,6 +70,11 @@ export default function App() {
   
   const [reviews, setReviews] = useState<any[]>([]);
   const [loading, setLoading] = useState(false);
+  const [entityForm, setEntityForm] = useState({ entity_id: '', entity_type: '', name: '', summary: '' });
+  const [factForm, setFactForm] = useState({ predicate: '', value: '', object_entity_id: '', confidence: '1.0' });
+  const [editingFactId, setEditingFactId] = useState<string | null>(null);
+  const [editingFactValue, setEditingFactValue] = useState('');
+  const [actionError, setActionError] = useState<string | null>(null);
 
   useEffect(() => {
     refreshData();
@@ -98,6 +116,7 @@ export default function App() {
   const loadEntity = async (entityId: string) => {
     setLoading(true);
     setFileContent(null);
+    setActionError(null);
     try {
       const eData = await fetchEntity(entityId);
       setEntityData(eData);
@@ -117,45 +136,20 @@ export default function App() {
     setEntityData(null);
     setNeighborsData([]);
     setFileContent(null);
+    setActionError(null);
     
     if (node.type === 'file') {
-      let entityId: string | null = null;
-      
       if (node.originalPath) {
-        const parts = node.originalPath.split('/');
-        if (parts.length >= 3) {
-          const typePlural = parts[1];
-          const filename = parts[parts.length - 1].replace(/\.md$/, '');
-          const typeMap: Record<string, string> = {
-            'employees': 'employee',
-            'customers': 'customer',
-            'products': 'product',
-            'sales': 'sale',
-            'sentiment': 'sentiment',
-            'support-chats': 'support_chat',
-            'tickets': 'ticket',
-            'clients': 'client',
-            'vendors': 'vendor',
-            'email-threads': 'email_thread',
-            'conversations': 'conversation',
-            'posts': 'social_post',
-            'repos': 'repo'
-          };
-          if (typeMap[typePlural]) {
-            entityId = `${typeMap[typePlural]}:${filename}`;
-          }
-        }
-      }
-
-      if (entityId) {
-        loadEntity(entityId);
-      } else if (node.originalPath) {
         setLoading(true);
         try {
           const fData = await fetchFile(node.originalPath);
           setFileContent(fData.content);
+          if (fData.entity_id) {
+            await loadEntity(fData.entity_id);
+          }
         } catch (e) {
           console.error("Failed to load file", e);
+          setActionError("Could not load this VFS file.");
         } finally {
           setLoading(false);
         }
@@ -164,10 +158,92 @@ export default function App() {
   };
 
   const handleResolve = async (reviewId: string, choice: string) => {
-    await resolveReview(reviewId, choice);
-    refreshData();
-    if (entityData) {
+    try {
+      await resolveReview(reviewId, choice);
+      refreshData();
+      if (entityData) {
+        loadEntity(entityData.entity.id);
+      }
+    } catch (e) {
+      console.error("Resolve failed", e);
+      setActionError("Could not resolve this review.");
+    }
+  };
+
+  const handleCreateEntity = async () => {
+    if (!entityForm.entity_id.trim() || !entityForm.entity_type.trim() || !entityForm.name.trim()) return;
+    try {
+      const created = await createEntity({
+        entity_id: entityForm.entity_id.trim(),
+        entity_type: entityForm.entity_type.trim(),
+        name: entityForm.name.trim(),
+        summary: entityForm.summary.trim() || undefined
+      });
+      setEntityForm({ entity_id: '', entity_type: '', name: '', summary: '' });
+      refreshData();
+      loadEntity(created.entity_id);
+    } catch (e) {
+      console.error("Create entity failed", e);
+      setActionError("Could not create entity. Check the ID is unique.");
+    }
+  };
+
+  const handleAddFact = async () => {
+    if (!entityData || !factForm.predicate.trim()) return;
+    const confidence = Number.parseFloat(factForm.confidence);
+    try {
+      await addFact(entityData.entity.id, {
+        predicate: factForm.predicate.trim(),
+        value: factForm.value.trim() || undefined,
+        object_entity_id: factForm.object_entity_id.trim() || undefined,
+        confidence: Number.isFinite(confidence) ? confidence : 1.0
+      });
+      setFactForm({ predicate: '', value: '', object_entity_id: '', confidence: '1.0' });
+      refreshData();
       loadEntity(entityData.entity.id);
+    } catch (e) {
+      console.error("Add fact failed", e);
+      setActionError("Could not add fact. Provide a value or object entity ID.");
+    }
+  };
+
+  const handleEditFact = async (factId: string) => {
+    if (!entityData) return;
+    try {
+      await editFact(factId, { value: editingFactValue });
+      setEditingFactId(null);
+      setEditingFactValue('');
+      refreshData();
+      loadEntity(entityData.entity.id);
+    } catch (e) {
+      console.error("Edit fact failed", e);
+      setActionError("Could not edit fact.");
+    }
+  };
+
+  const handleDeleteFact = async (factId: string) => {
+    if (!entityData) return;
+    try {
+      await deleteFact(factId);
+      refreshData();
+      loadEntity(entityData.entity.id);
+    } catch (e) {
+      console.error("Delete fact failed", e);
+      setActionError("Could not delete fact.");
+    }
+  };
+
+  const handleDeleteEntity = async () => {
+    if (!entityData) return;
+    try {
+      await deleteEntity(entityData.entity.id);
+      setEntityData(null);
+      setNeighborsData([]);
+      setFileContent(null);
+      refreshData();
+    } catch (e) {
+      console.error("Delete entity failed", e);
+      setActionError("Could not delete entity.");
     }
   };
 
@@ -187,6 +263,37 @@ export default function App() {
             <Hexagon size={24} color="var(--accent-cyan)" />
             <span>Qontext AI</span>
           </div>
+        </div>
+
+        <div className="create-panel">
+          <div className="heading-sm">Create Entity</div>
+          <input
+            type="text"
+            placeholder="entity:id"
+            value={entityForm.entity_id}
+            onChange={e => setEntityForm({ ...entityForm, entity_id: e.target.value })}
+          />
+          <input
+            type="text"
+            placeholder="type"
+            value={entityForm.entity_type}
+            onChange={e => setEntityForm({ ...entityForm, entity_type: e.target.value })}
+          />
+          <input
+            type="text"
+            placeholder="name"
+            value={entityForm.name}
+            onChange={e => setEntityForm({ ...entityForm, name: e.target.value })}
+          />
+          <textarea
+            placeholder="summary"
+            value={entityForm.summary}
+            onChange={e => setEntityForm({ ...entityForm, summary: e.target.value })}
+          />
+          <button className="action-button primary" onClick={handleCreateEntity}>
+            <Plus size={14} />
+            Add entity
+          </button>
         </div>
 
         <div style={{ position: 'relative', marginBottom: '24px', display: 'flex', gap: '8px' }}>
@@ -296,6 +403,15 @@ export default function App() {
         style={{ padding: '20px', display: 'flex', flexDirection: 'column' }}
       >
         <div className="heading-sm">Inspector</div>
+
+        {actionError && (
+          <div className="error-banner">
+            <span>{actionError}</span>
+            <button onClick={() => setActionError(null)} aria-label="Dismiss error">
+              <X size={14} />
+            </button>
+          </div>
+        )}
         
         {!entityData && !fileContent && !loading && (
           <div style={{ textAlign: 'center', color: 'var(--text-secondary)', marginTop: '40px', fontSize: '0.875rem' }}>
@@ -328,13 +444,13 @@ export default function App() {
                         Predicate: <b>{r.predicate}</b>
                       </div>
                       {candidates.map((c: any) => (
-                        <div key={c.choice} style={{ background: 'rgba(0,0,0,0.3)', padding: '8px', borderRadius: '6px', marginBottom: '4px', fontSize: '0.75rem', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                        <div key={c.choice_id} style={{ background: 'rgba(0,0,0,0.3)', padding: '8px', borderRadius: '6px', marginBottom: '4px', fontSize: '0.75rem', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                           <div>
                             <div style={{ color: 'var(--text-primary)' }}>{c.value}</div>
                             <div style={{ color: 'var(--text-tertiary)', fontSize: '0.65rem' }}>Conf: {Math.round(c.confidence*100)}%</div>
                           </div>
                           <button 
-                            onClick={() => handleResolve(r.id, c.choice)}
+                            onClick={() => handleResolve(r.id, c.choice_id)}
                             style={{ background: 'var(--accent-cyan)', color: '#000', border: 'none', padding: '4px 8px', borderRadius: '4px', cursor: 'pointer', fontWeight: 'bold', fontSize: '0.7rem' }}
                           >
                             Resolve
@@ -358,16 +474,70 @@ export default function App() {
                   {entityData.entity.summary}
                 </div>
               )}
+              <button className="action-button danger" onClick={handleDeleteEntity}>
+                <Trash2 size={14} />
+                Delete entity
+              </button>
+            </div>
+
+            <div className="prop-group">
+              <div className="heading-sm">Add Fact</div>
+              <input
+                type="text"
+                placeholder="predicate"
+                value={factForm.predicate}
+                onChange={e => setFactForm({ ...factForm, predicate: e.target.value })}
+              />
+              <input
+                type="text"
+                placeholder="value"
+                value={factForm.value}
+                onChange={e => setFactForm({ ...factForm, value: e.target.value })}
+              />
+              <input
+                type="text"
+                placeholder="object entity id"
+                value={factForm.object_entity_id}
+                onChange={e => setFactForm({ ...factForm, object_entity_id: e.target.value })}
+              />
+              <input
+                type="number"
+                min="0"
+                max="1"
+                step="0.05"
+                placeholder="confidence"
+                value={factForm.confidence}
+                onChange={e => setFactForm({ ...factForm, confidence: e.target.value })}
+              />
+              <button className="action-button primary" onClick={handleAddFact}>
+                <Plus size={14} />
+                Add fact
+              </button>
             </div>
 
             <div className="prop-group">
               <div className="heading-sm">Provenance (Facts)</div>
               {entityData.facts.map((fact: any) => (
-                <ProvenanceItem 
+                <ProvenanceItem
                   key={fact.id}
-                  source={fact.source_id.split(':')[0]} 
-                  fact={`${fact.predicate}: ${fact.value || fact.object_entity_id}`} 
-                  confidence={Math.round(fact.confidence * 100)} 
+                  source={fact.source_id}
+                  factId={fact.id}
+                  predicate={fact.predicate}
+                  value={fact.value || fact.object_entity_id || ''}
+                  confidence={Math.round(fact.confidence * 100)}
+                  editing={editingFactId === fact.id}
+                  editingValue={editingFactValue}
+                  onStartEdit={() => {
+                    setEditingFactId(fact.id);
+                    setEditingFactValue(fact.value || '');
+                  }}
+                  onCancelEdit={() => {
+                    setEditingFactId(null);
+                    setEditingFactValue('');
+                  }}
+                  onChangeEdit={setEditingFactValue}
+                  onSaveEdit={() => handleEditFact(fact.id)}
+                  onDelete={() => handleDeleteFact(fact.id)}
                 />
               ))}
               {entityData.facts.length === 0 && <div style={{ fontSize: '0.875rem', color: 'var(--text-secondary)' }}>No facts available.</div>}
@@ -535,14 +705,63 @@ function TreeNode({ node, level, onSelect, selectedId }: { node: any, level: num
   );
 }
 
-function ProvenanceItem({ source, fact, confidence }: { source: string, fact: string, confidence: number }) {
+function ProvenanceItem({
+  source,
+  factId,
+  predicate,
+  value,
+  confidence,
+  editing,
+  editingValue,
+  onStartEdit,
+  onCancelEdit,
+  onChangeEdit,
+  onSaveEdit,
+  onDelete
+}: {
+  source: string;
+  factId: string;
+  predicate: string;
+  value: string;
+  confidence: number;
+  editing: boolean;
+  editingValue: string;
+  onStartEdit: () => void;
+  onCancelEdit: () => void;
+  onChangeEdit: (value: string) => void;
+  onSaveEdit: () => void;
+  onDelete: () => void;
+}) {
   return (
     <div style={{ background: 'var(--bg-surface)', padding: '10px', borderRadius: '8px', marginBottom: '8px', border: '1px solid var(--border-subtle)' }}>
       <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '4px' }}>
-        <span style={{ fontSize: '0.75rem', color: 'var(--accent-cyan)', textTransform: 'uppercase' }}>{source}</span>
+        <span style={{ fontSize: '0.72rem', color: 'var(--accent-cyan)', overflowWrap: 'anywhere' }}>{source}</span>
         <span style={{ fontSize: '0.75rem', color: confidence >= 90 ? '#4caf50' : '#ff9800' }}>{confidence}%</span>
       </div>
-      <div style={{ fontSize: '0.875rem', color: 'var(--text-primary)', wordBreak: 'break-word' }}>{fact}</div>
+      <div style={{ fontSize: '0.875rem', color: 'var(--text-primary)', wordBreak: 'break-word' }}>
+        <b>{predicate}</b>: {editing ? (
+          <input
+            type="text"
+            value={editingValue}
+            onChange={e => onChangeEdit(e.target.value)}
+            style={{ marginTop: '8px' }}
+          />
+        ) : value}
+      </div>
+      <div className="fact-actions">
+        <button onClick={editing ? onSaveEdit : onStartEdit} title={editing ? 'Save fact' : 'Edit fact'}>
+          {editing ? <Save size={13} /> : <Edit3 size={13} />}
+        </button>
+        {editing && (
+          <button onClick={onCancelEdit} title="Cancel edit">
+            <X size={13} />
+          </button>
+        )}
+        <button onClick={onDelete} title="Delete fact">
+          <Trash2 size={13} />
+        </button>
+      </div>
+      <div style={{ marginTop: '6px', color: 'var(--text-tertiary)', fontSize: '0.65rem', overflowWrap: 'anywhere' }}>{factId}</div>
     </div>
   );
 }

@@ -138,10 +138,12 @@ class Store:
             """
             DROP TABLE IF EXISTS edges;
             DROP TABLE IF EXISTS facts;
+            DROP TABLE IF EXISTS entity_embeddings;
             DROP TABLE IF EXISTS entities;
             DROP TABLE IF EXISTS source_records;
             DROP TABLE IF EXISTS vfs_files;
             DROP TABLE IF EXISTS review_items;
+            DROP TABLE IF EXISTS search_index;
             """
         )
         self.init_schema()

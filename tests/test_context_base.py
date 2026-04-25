@@ -286,7 +286,7 @@ class ContextBaseTests(unittest.TestCase):
         try:
             results = search(store, self.out, "VPN engineering", limit=5)
             paths = {item.get("path") for item in results}
-            self.assertIn("company/tickets/T1.md", paths)
+            self.assertIn("company/tickets/t1.md", paths)
             fts_results = search(store, self.out, "blocked project", limit=5)
             self.assertTrue(any(item.get("kind") in {"entity", "fact", "file"} for item in fts_results))
         finally:
@@ -308,7 +308,7 @@ class ContextBaseTests(unittest.TestCase):
     def test_incremental_build_removes_entities_and_vfs_for_deleted_sources(self) -> None:
         store = self._build(force=True)
         store.close()
-        ticket_file = self.out / "vfs/company/tickets/T1.md"
+        ticket_file = self.out / "vfs/company/tickets/t1.md"
         self.assertTrue(ticket_file.exists())
 
         self._write_json("IT_Service_Management/it_tickets.json", [])
@@ -320,7 +320,7 @@ class ContextBaseTests(unittest.TestCase):
             VFSGenerator(store, self.out).generate()
             self.assertIsNone(store.row("SELECT * FROM entities WHERE id = 'ticket:T1'"))
             self.assertIsNone(
-                store.row("SELECT * FROM vfs_files WHERE path = 'company/tickets/T1.md'")
+                store.row("SELECT * FROM vfs_files WHERE path = 'company/tickets/t1.md'")
             )
             self.assertFalse(ticket_file.exists())
         finally:

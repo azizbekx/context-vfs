@@ -45,3 +45,60 @@ export async function fetchReviews() {
   if (!res.ok) throw new Error('Failed to fetch reviews');
   return res.json();
 }
+
+export async function createEntity(payload: {
+  entity_id: string;
+  entity_type: string;
+  name: string;
+  path?: string;
+  summary?: string;
+}) {
+  const res = await fetch(`${API_BASE}/entities`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload)
+  });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
+export async function addFact(entityId: string, payload: {
+  predicate: string;
+  value?: string;
+  object_entity_id?: string;
+  confidence?: number;
+}) {
+  const res = await fetch(`${API_BASE}/entities/${encodeURIComponent(entityId)}/facts`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload)
+  });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
+export async function editFact(factId: string, payload: { value?: string; confidence?: number }) {
+  const res = await fetch(`${API_BASE}/facts/${encodeURIComponent(factId)}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload)
+  });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
+export async function deleteFact(factId: string) {
+  const res = await fetch(`${API_BASE}/facts/${encodeURIComponent(factId)}`, {
+    method: 'DELETE'
+  });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
+export async function deleteEntity(entityId: string) {
+  const res = await fetch(`${API_BASE}/entities/${encodeURIComponent(entityId)}`, {
+    method: 'DELETE'
+  });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}

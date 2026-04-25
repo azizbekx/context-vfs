@@ -90,7 +90,16 @@ def create_app(db_path: Path, out_dir: Path):
             raise HTTPException(status_code=400, detail="Path escapes VFS root")
         if not full_path.exists() or not full_path.is_file():
             raise HTTPException(status_code=404, detail="File not found")
-        return {"path": path, "content": full_path.read_text(encoding="utf-8")}
+        db = store()
+        try:
+            file_row = db.row("SELECT entity_id FROM vfs_files WHERE path = ?", (path,))
+            return {
+                "path": path,
+                "entity_id": file_row["entity_id"] if file_row else None,
+                "content": full_path.read_text(encoding="utf-8"),
+            }
+        finally:
+            db.close()
 
     @app.get("/entities/{entity_id:path}/neighbors")
     def entity_neighbors(entity_id: str):

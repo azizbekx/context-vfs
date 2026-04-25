@@ -12,6 +12,7 @@ from .storage import Store
 from .utils import as_list, clean_text, rel_path, slugify, stable_hash, stable_id
 
 logger = logging.getLogger(__name__)
+DEFAULT_SCHEMA_PATH = Path(__file__).resolve().parents[1] / "dataset_schema.json"
 
 
 @dataclass(frozen=True)
@@ -56,9 +57,18 @@ class ContextBuilder:
         self.run_id = run_id
         self.force = force
         self.use_llm = use_llm
-        self.schema = schema
+        self.schema = schema if schema is not None else self._load_default_schema()
         self.stats = BuildStats()
         self._pending_policy_knowledge: dict[str, dict[str, Any]] = {}
+
+    def _load_default_schema(self) -> dict[str, Any] | None:
+        if not DEFAULT_SCHEMA_PATH.exists():
+            return None
+        try:
+            return json.loads(DEFAULT_SCHEMA_PATH.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            logger.warning("Could not load default schema %s: %s", DEFAULT_SCHEMA_PATH, exc)
+            return None
 
     def build(self) -> BuildStats:
         extractors: list[Callable[[], None]] = [

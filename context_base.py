@@ -207,7 +207,7 @@ def build_parser() -> argparse.ArgumentParser:
     build_parser.add_argument(
         "--use-llm",
         action="store_true",
-        help="Reserved for Gemini-assisted extraction; deterministic extraction remains the default.",
+        help="Enable Gemini-assisted policy extraction, embeddings, and synonym conflict checks.",
     )
     build_parser.set_defaults(func=cmd_build)
 

@@ -90,7 +90,7 @@ body {
 /* Typography */
 h1, h2, h3, h4 {
   font-weight: 600;
-  letter-spacing: -0.02em;
+  letter-spacing: 0;
 }
 
 .heading-sm {
@@ -178,4 +178,109 @@ h1, h2, h3, h4 {
   background: linear-gradient(135deg, var(--accent-cyan), var(--accent-purple));
   -webkit-background-clip: text;
   -webkit-text-fill-color: transparent;
+}
+
+input, textarea, button {
+  font: inherit;
+}
+
+input, textarea {
+  width: 100%;
+  min-width: 0;
+  border: 1px solid var(--border-subtle);
+  border-radius: 6px;
+  background: rgba(0, 0, 0, 0.24);
+  color: var(--text-primary);
+  padding: 8px 10px;
+  outline: none;
+  font-size: 0.8rem;
+}
+
+textarea {
+  resize: vertical;
+  min-height: 64px;
+}
+
+input:focus, textarea:focus {
+  border-color: var(--border-focus);
+}
+
+.create-panel {
+  display: grid;
+  gap: 8px;
+  padding: 12px;
+  margin-bottom: 18px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 8px;
+  background: rgba(0, 0, 0, 0.14);
+}
+
+.action-button {
+  width: 100%;
+  min-height: 34px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 6px;
+  background: var(--bg-surface);
+  color: var(--text-primary);
+  cursor: pointer;
+  font-size: 0.8rem;
+  font-weight: 650;
+  margin-top: 8px;
+}
+
+.action-button.primary {
+  background: var(--accent-cyan);
+  color: #050607;
+  border-color: var(--accent-cyan);
+}
+
+.action-button.danger {
+  color: #ffb4a8;
+  border-color: rgba(255, 100, 80, 0.35);
+}
+
+.error-banner {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 10px;
+  margin-bottom: 14px;
+  border: 1px solid rgba(255, 100, 80, 0.35);
+  border-radius: 8px;
+  color: #ffb4a8;
+  background: rgba(255, 100, 80, 0.08);
+  font-size: 0.78rem;
+}
+
+.error-banner button,
+.fact-actions button {
+  border: 1px solid var(--border-subtle);
+  border-radius: 5px;
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--text-secondary);
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.error-banner button {
+  width: 24px;
+  height: 24px;
+}
+
+.fact-actions {
+  display: flex;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.fact-actions button {
+  width: 28px;
+  height: 26px;
 }
