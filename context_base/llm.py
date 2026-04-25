@@ -5,8 +5,8 @@ import os
 import re
 from typing import Any
 
-GENERATION_MODEL = "gemini-2.5-flash"
-EMBEDDING_MODEL = "gemini-embedding-001"
+GENERATION_MODEL = "gemini-3.1-flash-lite-preview"
+EMBEDDING_MODEL = "gemini-embedding-2"
 
 
 def _require_key() -> str:

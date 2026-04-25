@@ -53,6 +53,13 @@ class Store:
                 updated_at TEXT NOT NULL
             );
 
+            CREATE TABLE IF NOT EXISTS entity_embeddings (
+                entity_id TEXT PRIMARY KEY,
+                text_content TEXT NOT NULL,
+                embedding_json TEXT NOT NULL,
+                FOREIGN KEY(entity_id) REFERENCES entities(id) ON DELETE CASCADE
+            );
+
             CREATE TABLE IF NOT EXISTS facts (
                 id TEXT PRIMARY KEY,
                 subject_id TEXT NOT NULL,

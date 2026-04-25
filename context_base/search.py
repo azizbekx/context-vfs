@@ -7,15 +7,86 @@ from .storage import Store
 from .utils import clean_text
 
 
+def semantic_search(store: Store, query: str, limit: int = 5) -> list[dict[str, Any]]:
+    try:
+        from google import genai
+        import json
+        client = genai.Client()
+    except ImportError:
+        return []
+        
+    try:
+        res = client.models.embed_content(model="gemini-embedding-2", contents=[query])
+        if not res.embeddings:
+            return []
+        query_emb = res.embeddings[0].values
+    except Exception:
+        return []
+
+    rows = store.rows("SELECT entity_id, embedding_json FROM entity_embeddings")
+    if not rows:
+        return []
+    
+    def cos_sim(v1, v2):
+        dot = sum(a*b for a, b in zip(v1, v2))
+        m1 = sum(a*a for a in v1) ** 0.5
+        m2 = sum(b*b for b in v2) ** 0.5
+        if m1 == 0 or m2 == 0: return 0
+        return dot / (m1 * m2)
+
+    scored = []
+    for row in rows:
+        try:
+            emb = json.loads(row["embedding_json"])
+            score = cos_sim(query_emb, emb)
+            scored.append((score, row["entity_id"]))
+        except Exception:
+            continue
+    
+    scored.sort(reverse=True, key=lambda x: x[0])
+    top_ids = [s[1] for s in scored[:limit] if s[0] > 0.4]
+    if not top_ids:
+        return []
+
+    results = []
+    placeholders = ",".join("?" for _ in top_ids)
+    for row in store.rows(f"SELECT id, type, name, path, summary FROM entities WHERE id IN ({placeholders})", tuple(top_ids)):
+        results.append({
+            "kind": "entity",
+            "entity_id": row["id"],
+            "type": row["type"],
+            "name": row["name"],
+            "path": row["path"],
+            "snippet": clean_text(row["summary"], 240),
+            "neighbors": neighbors(store, row["id"], limit=5),
+        })
+    return results
+
+
 def search(store: Store, out_dir: Path, query: str, limit: int = 12) -> list[dict[str, Any]]:
     terms = [term.lower() for term in query.split() if len(term) > 1]
     if not terms:
         return []
+    
+    results: list[dict[str, Any]] = []
+    seen_entity_ids = set()
+    
+    semantic_results = semantic_search(store, query, limit=max(3, limit // 2))
+    for r in semantic_results:
+        results.append(r)
+        seen_entity_ids.add(r["entity_id"])
+        
     fts_results = _fts_search(store, query, limit)
     if fts_results:
-        return fts_results
+        for r in fts_results:
+            if r.get("entity_id") not in seen_entity_ids:
+                results.append(r)
+                if r.get("entity_id"):
+                    seen_entity_ids.add(r["entity_id"])
+        if len(results) >= limit:
+            return results[:limit]
+
     pattern = "%" + "%".join(terms) + "%"
-    results: list[dict[str, Any]] = []
 
     for row in store.rows(
         """
@@ -27,6 +98,9 @@ def search(store: Store, out_dir: Path, query: str, limit: int = 12) -> list[dic
         """,
         (pattern, limit),
     ):
+        if row["id"] in seen_entity_ids:
+            continue
+        seen_entity_ids.add(row["id"])
         results.append(
             {
                 "kind": "entity",

@@ -89,8 +89,53 @@ class ContextBuilder:
         if cleaned_entities:
             logger.info("Cleaned up %d orphaned entities", cleaned_entities)
         self.detect_conflicts()
+        self.generate_embeddings()
         self.store.commit()
         return self.stats
+
+    def generate_embeddings(self) -> None:
+        if not self.use_llm:
+            return
+        
+        rows = self.store.rows("""
+            SELECT e.id, e.name, e.summary 
+            FROM entities e 
+            LEFT JOIN entity_embeddings ee ON e.id = ee.entity_id 
+            WHERE ee.entity_id IS NULL OR ee.text_content != (e.name || ' ' || COALESCE(e.summary, ''))
+        """)
+        if not rows:
+            return
+            
+        logger.info("Generating embeddings for %d entities...", len(rows))
+        try:
+            from google import genai
+            client = genai.Client()
+        except ImportError:
+            logger.warning("google-genai not installed or no API key. Skipping embeddings.")
+            return
+
+        batch_size = 100
+        for i in range(0, len(rows), batch_size):
+            batch = rows[i:i+batch_size]
+            texts = [f"{r['name']} {r['summary'] or ''}".strip() for r in batch]
+            try:
+                res = client.models.embed_content(
+                    model="gemini-embedding-2", 
+                    contents=texts
+                )
+                for row, emb in zip(batch, res.embeddings):
+                    text_content = f"{row['name']} {row['summary'] or ''}".strip()
+                    self.store.conn.execute("""
+                        INSERT INTO entity_embeddings (entity_id, text_content, embedding_json)
+                        VALUES (?, ?, ?)
+                        ON CONFLICT(entity_id) DO UPDATE SET
+                            text_content = excluded.text_content,
+                            embedding_json = excluded.embedding_json
+                    """, (row["id"], text_content, json.dumps(emb.values)))
+                self.store.conn.commit()
+                logger.info("Embedded %d / %d", min(i + len(batch), len(rows)), len(rows))
+            except Exception as e:
+                logger.error("Embedding batch failed: %s", e)
 
     def json_records(self, relative: str) -> list[dict[str, Any]]:
         path = self.dataset_dir / relative
