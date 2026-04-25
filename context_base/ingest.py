@@ -3,6 +3,7 @@ from __future__ import annotations
 import csv
 import json
 import logging
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
@@ -48,12 +49,14 @@ class ContextBuilder:
         *,
         force: bool = False,
         use_llm: bool = False,
+        schema: dict | None = None,
     ):
         self.store = store
         self.dataset_dir = dataset_dir
         self.run_id = run_id
         self.force = force
         self.use_llm = use_llm
+        self.schema = schema
         self.stats = BuildStats()
         self._pending_policy_knowledge: dict[str, dict[str, Any]] = {}
 
@@ -81,7 +84,18 @@ class ContextBuilder:
                 extractor()
             except Exception as exc:
                 logger.warning("Extractor %s failed: %s", extractor.__name__, exc)
+        if self.schema:
+            try:
+                self.extract_from_schema(self.schema)
+            except Exception as exc:
+                logger.warning("Schema extractor failed: %s", exc)
         self.store.mark_missing_sources_stale(self.run_id)
+        cleaned = self.store.cleanup_stale_facts()
+        if cleaned:
+            logger.info("Cleaned up %d stale facts", cleaned)
+        cleaned_entities = self.store.cleanup_orphaned_entities()
+        if cleaned_entities:
+            logger.info("Cleaned up %d orphaned entities", cleaned_entities)
         self.detect_conflicts()
         self.store.commit()
         return self.stats
@@ -263,6 +277,7 @@ class ContextBuilder:
             self.fact(employee_id, "resume_category", source_id, value=record.get("category"))
             self.fact(employee_id, "resume_content", source_id, value=clean_text(record.get("content"), 900))
             self.fact(employee_id, "resume_file", source_id, value=record.get("file_path"))
+            self._review_resume_identity(employee_id, source_id, record)
 
     def extract_customers(self) -> None:
         relative = "Customer_Relation_Management/customers.json"
@@ -328,7 +343,7 @@ class ContextBuilder:
                 f"sale:{sale_id}",
                 "sale",
                 f"Sale {sale_id}",
-                None,
+                f"company/sales/{slugify(sale_id)}.md",
                 aliases=[sale_id],
             )
             customer_entity = f"customer:{customer_id}"
@@ -357,7 +372,7 @@ class ContextBuilder:
                 f"sentiment:{sentiment_id}",
                 "sentiment",
                 f"Product sentiment {sentiment_id}",
-                None,
+                f"company/sentiment/{slugify(sentiment_id)}.md",
             )
             customer_entity = f"customer:{customer_id}"
             product_entity = f"product:{product_id}"
@@ -377,7 +392,7 @@ class ContextBuilder:
                 f"support_chat:{chat_id}",
                 "support_chat",
                 f"Support chat {chat_id}",
-                None,
+                f"company/support-chats/{slugify(chat_id)}.md",
                 summary=clean_text(record.get("text"), 420),
             )
             if not changed:
@@ -503,7 +518,7 @@ class ContextBuilder:
                 f"email_thread:{thread_id}",
                 "email_thread",
                 record.get("subject") or f"Email thread {thread_id}",
-                None,
+                f"company/email-threads/{slugify(thread_id)}.md",
                 aliases=[thread_id, record.get("category", "")],
                 summary=clean_text(record.get("body"), 420),
             )
@@ -533,7 +548,7 @@ class ContextBuilder:
                 f"conversation:{conversation_id}",
                 "conversation",
                 f"Conversation {conversation_id}",
-                None,
+                f"company/conversations/{slugify(conversation_id)}.md",
                 summary=clean_text(record.get("text"), 420),
             )
             sender = clean_text(record.get("sender_emp_id"))
@@ -557,7 +572,7 @@ class ContextBuilder:
                 f"post:{post_id}",
                 "social_post",
                 record.get("Title") or f"Post {index}",
-                None,
+                f"company/posts/{post_id}.md",
                 summary=clean_text(record.get("Post"), 420),
             )
             emp_id = clean_text(record.get("emp_id"))
@@ -636,6 +651,7 @@ class ContextBuilder:
             self.fact(entity_id, "summary", source_id, value=summary, confidence=0.75, extraction_method="pdf-text")
             for topic in self._policy_topics(policy_name, text):
                 self.fact(entity_id, "topic", source_id, value=topic, confidence=0.72, extraction_method="pdf-text")
+            self._extract_deterministic_policy_processes(policy_name, entity_id, source_id, text)
         self._extract_policy_processes()
 
     def _extract_pdf_text(self, pdf_path: Path) -> str:
@@ -709,19 +725,127 @@ class ContextBuilder:
             work_id,
             "work_item",
             title,
-            None,
+            f"company/work-items/{work_id.replace(':', '-')}.md",
             summary=body,
             confidence=0.62,
         )
         self.fact(source_entity_id, "mentions_work_item", source_id, object_entity_id=work_id, confidence=0.62)
         self.fact(work_id, "evidence", source_id, value=body, confidence=0.62, extraction_method="heuristic")
+        owner_match = re.search(r"\b(?:owner|assigned to|by)\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+){0,2})", body)
+        date_match = re.search(r"\b(?:by|deadline|due)\s+([A-Z][a-z]+ \d{1,2}|\d{4}-\d{2}-\d{2})", body, re.IGNORECASE)
+        if date_match:
+            self.fact(work_id, "deadline", source_id, value=date_match.group(1), confidence=0.58, extraction_method="heuristic")
+        if "blocked" in lowered or "blocker" in lowered:
+            self.fact(work_id, "status", source_id, value="blocked", confidence=0.60, extraction_method="heuristic")
+            self.fact(work_id, "blocker", source_id, value=body, confidence=0.55, extraction_method="heuristic")
+        elif "on track" in lowered:
+            self.fact(work_id, "status", source_id, value="on track", confidence=0.58, extraction_method="heuristic")
+        if owner_match:
+            self.fact(work_id, "owner_hint", source_id, value=owner_match.group(1), confidence=0.52, extraction_method="heuristic")
+
+        if "project" in lowered or "launch" in lowered or "milestone" in lowered:
+            project_title = self._project_title(body)
+            project_id = f"project:{slugify(project_title)}"
+            self.entity(
+                project_id,
+                "project",
+                project_title,
+                f"company/projects/{slugify(project_title)}.md",
+                summary=body,
+                confidence=0.58,
+            )
+            self.fact(work_id, "part_of_project", source_id, object_entity_id=project_id, confidence=0.58, extraction_method="heuristic")
+            self.fact(project_id, "evidence", source_id, value=body, confidence=0.55, extraction_method="heuristic")
+
+        if "task" in lowered or "deadline" in lowered or "blocked" in lowered:
+            task_id = stable_id("task", source_entity_id, body, length=18)
+            self.entity(
+                task_id,
+                "task",
+                title,
+                f"company/tasks/{task_id.replace(':', '-')}.md",
+                summary=body,
+                confidence=0.58,
+            )
+            self.fact(task_id, "evidence", source_id, value=body, confidence=0.55, extraction_method="heuristic")
+            self.fact(task_id, "derived_from", source_id, object_entity_id=work_id, confidence=0.58, extraction_method="heuristic")
+
+    def _project_title(self, text: str) -> str:
+        match = re.search(r"([A-Z][A-Za-z0-9& -]{2,80}?\s+(?:project|launch|milestone))", text, re.IGNORECASE)
+        if match:
+            return clean_text(match.group(1), 80).title()
+        return clean_text(text, 48).title()
+
+    def _extract_deterministic_policy_processes(
+        self,
+        policy_name: str,
+        policy_entity_id: str,
+        source_id: str,
+        text: str,
+    ) -> None:
+        haystack = f"{policy_name} {text}".lower()
+        templates = [
+            (
+                ("password",),
+                "Password reset and access recovery",
+                "User cannot access a system or needs password recovery.",
+                ["Verify requester identity.", "Reset credentials using approved tooling.", "Require secure password update.", "Record completion and notify requester."],
+            ),
+            (
+                ("data breach", "breach"),
+                "Data breach response",
+                "Potential or confirmed data breach is reported.",
+                ["Triage the incident.", "Contain affected systems or data.", "Notify responsible security/compliance owners.", "Document impact and required notifications."],
+            ),
+            (
+                ("leave",),
+                "Leave request approval",
+                "Employee requests time off.",
+                ["Employee submits leave request.", "Manager checks entitlement and staffing impact.", "Approve or reject request.", "Update HR leave balance."],
+            ),
+            (
+                ("expense", "reimbursement", "travel"),
+                "Expense reimbursement",
+                "Employee submits business expense or travel claim.",
+                ["Collect receipts and business purpose.", "Validate against reimbursement policy.", "Approve claim.", "Record payment status."],
+            ),
+            (
+                ("asset",),
+                "IT asset assignment",
+                "Employee needs a company device or asset change.",
+                ["Confirm asset request.", "Assign approved asset.", "Update asset register.", "Collect or retire asset when no longer needed."],
+            ),
+            (
+                ("incident", "security", "acceptable use"),
+                "Security incident escalation",
+                "Suspicious activity or policy violation is detected.",
+                ["Capture incident evidence.", "Escalate to security owner.", "Mitigate immediate risk.", "Track follow-up actions."],
+            ),
+        ]
+        for keywords, name, trigger, steps in templates:
+            if not any(keyword in haystack for keyword in keywords):
+                continue
+            slug = slugify(name)
+            process_id = f"process:{slug}"
+            self.entity(
+                process_id,
+                "process",
+                name,
+                f"company/processes/{slug}.md",
+                summary=f"Deterministic process extracted from {policy_name}.",
+                confidence=0.66,
+            )
+            self.fact(process_id, "source_policy", source_id, object_entity_id=policy_entity_id, confidence=0.66, extraction_method="deterministic-policy")
+            self.fact(process_id, "trigger", source_id, value=trigger, confidence=0.66, extraction_method="deterministic-policy")
+            for idx, step in enumerate(steps, start=1):
+                self.fact(process_id, f"step_{idx}", source_id, value=step, confidence=0.64, extraction_method="deterministic-policy")
 
     def detect_conflicts(self) -> None:
         rows = self.store.rows(
             """
             SELECT subject_id, predicate, COUNT(DISTINCT value) AS value_count
             FROM facts
-            WHERE status = 'generated'
+            WHERE status IN ('generated', 'confirmed')
               AND object_entity_id IS NULL
               AND value IS NOT NULL
               AND confidence >= 0.8
@@ -733,14 +857,26 @@ class ContextBuilder:
         for row in rows:
             facts = self.store.rows(
                 """
-                SELECT f.id, f.value, f.confidence, s.dataset_path, s.record_id
+                SELECT f.id, f.subject_id, f.predicate, f.value, f.confidence, s.dataset_path, s.record_id
                 FROM facts f
                 JOIN source_records s ON s.id = f.source_id
-                WHERE f.subject_id = ? AND f.predicate = ? AND f.status = 'generated'
+                WHERE f.subject_id = ? AND f.predicate = ? AND f.status IN ('generated', 'confirmed')
                 ORDER BY f.confidence DESC, s.dataset_path
                 """,
                 (row["subject_id"], row["predicate"]),
             )
+            winner_id = self._auto_resolve(list(facts))
+            if winner_id:
+                loser_ids = [f["id"] for f in facts if f["id"] != winner_id]
+                self.store.auto_resolve_conflict(winner_id, loser_ids)
+                logger.info(
+                    "Auto-resolved %s/%s: winner=%s losers=%d",
+                    row["subject_id"],
+                    row["predicate"],
+                    winner_id,
+                    len(loser_ids),
+                )
+                continue
             candidates = []
             for index, fact in enumerate(facts, start=1):
                 candidates.append(
@@ -762,6 +898,221 @@ class ContextBuilder:
                 suggested_resolution="Choose the source of truth or keep the highest-confidence current system value.",
             )
             self.stats = self.stats.add(reviews=1)
+
+    def _auto_resolve(self, facts: list[dict[str, Any]]) -> str | None:
+        if len(facts) <= 1:
+            return facts[0]["id"] if facts else None
+        values = [f["value"] for f in facts if f["value"]]
+        if not values:
+            return facts[0]["id"]
+        normalized = {v.strip().lower() for v in values}
+        if len(normalized) == 1:
+            return max(facts, key=lambda f: f["confidence"])["id"]
+        preferred = self._source_of_truth_winner(facts)
+        if preferred:
+            return preferred
+        non_empty = [
+            f
+            for f in facts
+            if f["value"]
+            and f["value"].strip()
+            and f["value"].strip().lower() not in ("none", "null", "n/a", "-", "")
+        ]
+        if len(non_empty) == 1:
+            return non_empty[0]["id"]
+        return None
+
+    def _source_of_truth_winner(self, facts: list[dict[str, Any]]) -> str | None:
+        if not facts:
+            return None
+        predicate = facts[0]["predicate"]
+        subject_id = clean_text(facts[0]["subject_id"])
+        source_rules = []
+        if subject_id.startswith("employee:") and predicate in {
+            "name",
+            "email",
+            "department",
+            "reports_to",
+            "level",
+        }:
+            source_rules = ["Human_Resource_Management/Employees/"]
+        elif subject_id.startswith("ticket:") and predicate in {
+            "priority",
+            "status",
+            "assigned_to",
+            "assigned_date",
+        }:
+            source_rules = ["IT_Service_Management/"]
+        elif subject_id.startswith(("customer:", "client:")) and predicate in {
+            "owner",
+            "business_representative",
+            "poc_status",
+            "current_poc_product",
+        }:
+            source_rules = ["Customer_Relation_Management/", "Business_and_Management/"]
+        elif subject_id.startswith("policy:"):
+            source_rules = ["Policy_Documents/"]
+        if not source_rules:
+            return None
+
+        candidates = [
+            fact
+            for fact in facts
+            if any(str(fact["dataset_path"]).startswith(prefix) for prefix in source_rules)
+        ]
+        if len(candidates) == 1:
+            return candidates[0]["id"]
+        return None
+
+    def _review_resume_identity(
+        self,
+        employee_id: str,
+        resume_source_id: str,
+        record: dict[str, Any],
+    ) -> None:
+        employee = self.store.row("SELECT name, aliases_json FROM entities WHERE id = ?", (employee_id,))
+        if not employee:
+            return
+        hr_name = clean_text(employee["name"])
+        resume_name = clean_text(record.get("name"))
+        aliases = json.loads(employee["aliases_json"] or "[]")
+        hr_email = clean_text(next((alias for alias in aliases if "@" in alias), ""))
+        resume_email = clean_text(record.get("email"))
+        name_conflict = resume_name and hr_name and resume_name.lower() != hr_name.lower()
+        email_conflict = resume_email and hr_email and resume_email.lower() != hr_email.lower()
+        if not name_conflict and not email_conflict:
+            return
+
+        resume_source = self.store.row(
+            "SELECT dataset_path, record_id FROM source_records WHERE id = ?",
+            (resume_source_id,),
+        )
+        hr_fact = self.store.row(
+            """
+            SELECT f.id, s.dataset_path, s.record_id
+            FROM facts f
+            JOIN source_records s ON s.id = f.source_id
+            WHERE f.subject_id = ? AND f.predicate = 'email'
+            ORDER BY f.confidence DESC
+            LIMIT 1
+            """,
+            (employee_id,),
+        )
+        candidates = [
+            {
+                "choice_id": "keep-hr",
+                "fact_id": hr_fact["id"] if hr_fact else None,
+                "value": f"HR: {hr_name} <{hr_email or 'no email'}>",
+                "confidence": 1.0,
+                "source": (
+                    f"{hr_fact['dataset_path']}#{hr_fact['record_id']}"
+                    if hr_fact
+                    else "Human_Resource_Management/Employees"
+                ),
+            },
+            {
+                "choice_id": "investigate-resume",
+                "fact_id": None,
+                "value": f"Resume: {resume_name or 'unknown'} <{resume_email or 'no email'}>",
+                "confidence": 0.85,
+                "source": (
+                    f"{resume_source['dataset_path']}#{resume_source['record_id']}"
+                    if resume_source
+                    else "Human_Resource_Management/Resume"
+                ),
+            },
+        ]
+        review_id = stable_id("review", employee_id, "identity_mismatch", resume_source_id, length=18)
+        self.store.upsert_review(
+            review_id=review_id,
+            entity_id=employee_id,
+            conflict_type="identity_mismatch",
+            predicate="identity",
+            candidates=candidates,
+            suggested_resolution=(
+                "HR remains the source of truth for employee identity. "
+                "Investigate whether the resume is attached to the wrong employee or should become an alias."
+            ),
+        )
+        self.stats = self.stats.add(reviews=1)
+
+    def extract_from_schema(self, schema: dict[str, Any]) -> None:
+        for source_config in schema.get("sources", []):
+            path = source_config.get("path", "")
+            fmt = source_config.get("format", "json")
+            id_field = source_config.get("id_field", "id")
+            entity_type = source_config.get("entity_type", "generic")
+            name_field = source_config.get("name_field", id_field)
+            summary_field = source_config.get("summary_field")
+            path_template = source_config.get(
+                "path_template", "company/{type}/{id}.md"
+            )
+            alias_fields = source_config.get("alias_fields", [])
+            fact_mappings = source_config.get("facts", [])
+
+            records = (
+                self.json_records(path) if fmt == "json" else self.csv_records(path)
+            )
+            for record in records:
+                record_id = clean_text(record.get(id_field))
+                if not record_id:
+                    continue
+                source_id, changed = self.source(path, record_id, entity_type, record)
+                entity_id = f"{entity_type}:{record_id}"
+                format_values = {
+                    str(key): value
+                    for key, value in record.items()
+                    if str(key) not in {"type", "id"}
+                }
+                entity_path = path_template.format(
+                    type=slugify(entity_type),
+                    id=slugify(record_id),
+                    **format_values,
+                )
+                self.entity(
+                    entity_id,
+                    entity_type,
+                    record.get(name_field, record_id),
+                    entity_path,
+                    aliases=[record.get(f, "") for f in alias_fields],
+                    summary=(
+                        clean_text(record.get(summary_field), 420)
+                        if summary_field
+                        else None
+                    ),
+                )
+                if not changed:
+                    continue
+                for mapping in fact_mappings:
+                    field = mapping.get("field", "")
+                    predicate = mapping.get("predicate", field)
+                    entity_ref = mapping.get("entity_ref")
+                    if entity_ref:
+                        ref_value = clean_text(record.get(field))
+                        if ref_value:
+                            prefix = entity_ref.get("prefix", entity_type)
+                            tpl = entity_ref.get(
+                                "id_template", "{prefix}:{value}"
+                            )
+                            ref_id = tpl.format(prefix=prefix, value=ref_value)
+                            self.entity(
+                                ref_id,
+                                prefix,
+                                ref_value,
+                                None,
+                                confidence=0.7,
+                            )
+                            self.fact(
+                                entity_id,
+                                predicate,
+                                source_id,
+                                object_entity_id=ref_id,
+                                confidence=0.85,
+                            )
+                    else:
+                        self.fact(
+                            entity_id, predicate, source_id, value=record.get(field)
+                        )
 
     def _extract_policy_processes(self) -> None:
         if not self._pending_policy_knowledge:

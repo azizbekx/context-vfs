@@ -43,12 +43,19 @@ def cmd_build(args: argparse.Namespace) -> None:
         if args.force:
             store.reset()
         run_id = now_iso()
+        schema = None
+        if args.schema:
+            schema_path = Path(args.schema)
+            if not schema_path.exists():
+                raise SystemExit(f"Schema file does not exist: {schema_path}")
+            schema = json.loads(schema_path.read_text(encoding="utf-8"))
         builder = ContextBuilder(
             store,
             dataset_dir,
             run_id,
             force=args.force,
             use_llm=args.use_llm,
+            schema=schema,
         )
         stats = builder.build()
         generated = VFSGenerator(store, out_dir).generate()
@@ -192,6 +199,10 @@ def build_parser() -> argparse.ArgumentParser:
     build_parser.add_argument("--dataset-dir", default=str(DEFAULT_DATASET_DIR))
     build_parser.add_argument("--out-dir", default=str(DEFAULT_OUT_DIR))
     build_parser.add_argument("--force", action="store_true")
+    build_parser.add_argument(
+        "--schema",
+        help="Optional JSON schema for ingesting additional source files generically.",
+    )
     build_parser.add_argument(
         "--use-llm",
         action="store_true",

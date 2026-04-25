@@ -69,6 +69,12 @@ python3 context_base.py entity employee:emp_0431
 python3 context_base.py reviews
 ```
 
+Optionally ingest extra structured files with a declarative schema:
+
+```bash
+python3 context_base.py build --dataset-dir dataset --schema custom_sources.json
+```
+
 Run the local API:
 
 ```bash
@@ -93,9 +99,19 @@ GET /entities/employee:emp_0431/neighbors
 GET /search?q=vpn%20access
 GET /reviews
 POST /reviews/{review_id}/resolve
+POST /entities
+POST /entities/{entity_id}/facts
+PATCH /facts/{fact_id}
+DELETE /facts/{fact_id}
+POST /vfs/refresh
 ```
 
+The browser supports inspecting markdown VFS files, graph neighbors, source
+records, open review items, and manual fact/entity edits. Manual facts are
+stored as confirmed facts from `source:manual` and are preserved across
+rebuilds.
+
 The context-base build is deterministic by default and does not require a model
-API key. Policy PDFs are summarized from extracted text when `pypdf` is
-available. The `--use-llm` flag is reserved for future Gemini-assisted
-extraction extensions.
+API key. Policy PDFs are summarized from extracted text when `pypdf` or PyMuPDF
+is available. The `--use-llm` flag enables optional Gemini-assisted policy
+knowledge extraction when `GEMINI_API_KEY` is set.

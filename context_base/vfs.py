@@ -12,13 +12,22 @@ from .utils import clean_text, markdown_escape, now_iso, stable_hash
 RENDERED_TYPES = {
     "employee",
     "customer",
+    "conversation",
+    "email_thread",
     "product",
+    "sale",
+    "sentiment",
+    "social_post",
+    "support_chat",
     "ticket",
     "policy",
     "client",
     "vendor",
     "repo",
     "process",
+    "project",
+    "task",
+    "work_item",
     "overflow",
 }
 
@@ -31,6 +40,7 @@ class VFSGenerator:
 
     def generate(self) -> int:
         self.vfs_root.mkdir(parents=True, exist_ok=True)
+        self._generated_paths: set[str] = set()
         count = 0
         for row in self.store.rows(
             "SELECT * FROM entities WHERE path IS NOT NULL AND type IN (%s) ORDER BY type, name"
@@ -42,16 +52,34 @@ class VFSGenerator:
             count += 1
         count += self.generate_reviews()
         count += self.generate_index_pages()
+        count += self.generate_source_coverage()
+        self.prune_stale_files()
+        self.store.rebuild_search_index()
         self.store.commit()
         return count
 
     def write_file(self, relative_path: str, content: str, entity_id: str | None) -> None:
+        self._generated_paths.add(relative_path)
         target = self.vfs_root / relative_path
         target.parent.mkdir(parents=True, exist_ok=True)
         existing = target.read_text(encoding="utf-8") if target.exists() else None
         if existing != content:
             target.write_text(content, encoding="utf-8")
         self.store.upsert_vfs_file(relative_path, entity_id, content)
+
+    def prune_stale_files(self) -> None:
+        generated = getattr(self, "_generated_paths", set())
+        root = self.vfs_root.resolve()
+        known_paths = {row["path"] for row in self.store.rows("SELECT path FROM vfs_files")}
+        disk_paths = {
+            path.relative_to(self.vfs_root).as_posix()
+            for path in self.vfs_root.rglob("*.md")
+        }
+        for relative_path in sorted((known_paths | disk_paths) - generated):
+            target = (self.vfs_root / relative_path).resolve()
+            if root in target.parents and target.exists() and target.is_file():
+                target.unlink()
+            self.store.conn.execute("DELETE FROM vfs_files WHERE path = ?", (relative_path,))
 
     def render_entity(self, entity: dict[str, Any]) -> str:
         facts = self.store.rows(
@@ -122,8 +150,8 @@ class VFSGenerator:
             "",
             "## Facts",
             "",
-            "| Fact | Value | Source | Confidence |",
-            "|---|---|---|---|",
+            "| Fact | Value | Source | Confidence | Status | Method | Updated | Fact ID |",
+            "|---|---|---|---|---|---|---|---|",
         ]
         for fact in facts:
             value = fact["value"]
@@ -135,16 +163,21 @@ class VFSGenerator:
                 value = self._link(target["path"], target["name"]) if target else fact["object_entity_id"]
             lines.append(
                 "| %s | %s | `%s#%s` | %.2f |"
+                " %s | %s | %s | `%s` |"
                 % (
                     markdown_escape(fact["predicate"]),
                     markdown_escape(value),
                     markdown_escape(fact["dataset_path"]),
                     markdown_escape(fact["record_id"]),
                     float(fact["confidence"] or 0),
+                    markdown_escape(fact["status"]),
+                    markdown_escape(fact["extraction_method"]),
+                    markdown_escape(fact["updated_at"]),
+                    markdown_escape(fact["id"]),
                 )
             )
         if not facts:
-            lines.append("| No generated facts yet |  |  |  |")
+            lines.append("| No generated facts yet |  |  |  |  |  |  |  |")
         lines.extend(["", "## Relationships", ""])
         rel_lines = []
         for edge in outgoing:
@@ -168,6 +201,9 @@ class VFSGenerator:
 
     def generate_reviews(self) -> int:
         count = 0
+        review_rows = self.store.rows(
+            "SELECT * FROM review_items WHERE status = 'open' ORDER BY created_at"
+        )
         for review in self.store.rows(
             "SELECT * FROM review_items WHERE status = 'open' ORDER BY created_at"
         ):
@@ -175,7 +211,48 @@ class VFSGenerator:
             path = f"company/reviews/conflicts/{review['id'].replace(':', '-')}.md"
             self.write_file(path, content, review["entity_id"])
             count += 1
+        if review_rows:
+            self.write_file("company/reviews/_index.md", self.render_review_index(review_rows), None)
+            count += 1
         return count
+
+    def render_review_index(self, reviews: list[Any]) -> str:
+        lines = [
+            "---",
+            "id: review:index",
+            "type: index",
+            f"generated_at: {now_iso()}",
+            "---",
+            "",
+            "# Open Reviews",
+            "",
+            f"{len(reviews)} unresolved review items.",
+            "",
+            "| Review | Entity | Type |",
+            "|---|---|---|",
+        ]
+        for review in reviews[:1000]:
+            entity = self.store.row(
+                "SELECT name, path FROM entities WHERE id = ?",
+                (review["entity_id"],),
+            )
+            review_path = f"company/reviews/conflicts/{review['id'].replace(':', '-')}.md"
+            entity_label = (
+                self._link(entity["path"], entity["name"])
+                if entity
+                else markdown_escape(review["entity_id"])
+            )
+            lines.append(
+                "| [[%s\\|%s]] | %s | %s |"
+                % (
+                    review_path,
+                    markdown_escape(review["predicate"]),
+                    entity_label,
+                    markdown_escape(review["conflict_type"]),
+                )
+            )
+        lines.append("")
+        return "\n".join(lines)
 
     def render_review(self, review: dict[str, Any]) -> str:
         entity = self.store.row("SELECT * FROM entities WHERE id = ?", (review["entity_id"],))
@@ -242,12 +319,21 @@ class VFSGenerator:
             ("employee", "company/employees", "Employees", "employee"),
             ("customer", "company/customers", "Customers", "customer"),
             ("product", "company/products", "Products", "product"),
+            ("sale", "company/sales", "Sales", "sale"),
+            ("sentiment", "company/sentiment", "Product Sentiment", "sentiment"),
+            ("support_chat", "company/support-chats", "Support Chats", "support_chat"),
+            ("email_thread", "company/email-threads", "Email Threads", "email_thread"),
+            ("conversation", "company/conversations", "Conversations", "conversation"),
+            ("social_post", "company/posts", "Social Posts", "social_post"),
             ("policy", "company/policies", "Policies", "policy"),
             ("ticket", "company/tickets", "IT Tickets", "ticket"),
             ("client", "company/clients", "Business Clients", "client"),
             ("vendor", "company/vendors", "Vendors", "vendor"),
             ("repo", "company/repos", "Repositories", "repo"),
             ("process", "company/processes", "Processes & SOPs", "process"),
+            ("project", "company/projects", "Projects", "project"),
+            ("task", "company/tasks", "Tasks", "task"),
+            ("work_item", "company/work-items", "Work Items", "work_item"),
             ("overflow", "company/overflow", "Overflow Data", "overflow"),
         ]
 
@@ -272,6 +358,11 @@ class VFSGenerator:
             company_lines.append(f"- [[company/reviews/_index.md|{review_count} unresolved conflicts]]")
             company_lines.append("")
 
+        company_lines.append("## Operations")
+        company_lines.append("")
+        company_lines.append("- [[company/source-coverage.md|Source coverage]]")
+        company_lines.append("")
+
         company_lines.append("## Graph Stats")
         company_lines.append("")
         entity_count = self.store.row("SELECT COUNT(*) AS c FROM entities")["c"]
@@ -287,6 +378,76 @@ class VFSGenerator:
         self.write_file("company/index.md", "\n".join(company_lines), None)
         count += 1
         return count
+
+    def generate_source_coverage(self) -> int:
+        sources = self.store.rows(
+            """
+            SELECT dataset_path, kind, COUNT(*) AS records,
+                   SUM(CASE WHEN stale = 1 THEN 1 ELSE 0 END) AS stale_records
+            FROM source_records
+            WHERE id != 'source:manual'
+            GROUP BY dataset_path, kind
+            ORDER BY dataset_path, kind
+            """
+        )
+        entity_rows = self.store.rows(
+            "SELECT type, COUNT(*) AS count FROM entities GROUP BY type ORDER BY count DESC"
+        )
+        fact_rows = self.store.rows(
+            """
+            SELECT s.dataset_path, COUNT(f.id) AS facts
+            FROM facts f
+            JOIN source_records s ON s.id = f.source_id
+            WHERE f.status IN ('generated', 'confirmed')
+            GROUP BY s.dataset_path
+            ORDER BY facts DESC
+            LIMIT 80
+            """
+        )
+        review_count = self.store.row(
+            "SELECT COUNT(*) AS c FROM review_items WHERE status = 'open'"
+        )["c"]
+        stale_count = self.store.row(
+            "SELECT COUNT(*) AS c FROM source_records WHERE stale = 1"
+        )["c"]
+        lines = [
+            "---",
+            "id: source-coverage",
+            "type: operations",
+            f"generated_at: {now_iso()}",
+            "---",
+            "",
+            "# Source Coverage",
+            "",
+            "## Health",
+            "",
+            f"- Open reviews: {review_count}",
+            f"- Stale source records: {stale_count}",
+            "",
+            "## Sources",
+            "",
+            "| Source | Kind | Records | Stale |",
+            "|---|---|---|---|",
+        ]
+        for row in sources:
+            lines.append(
+                "| %s | %s | %s | %s |"
+                % (
+                    markdown_escape(row["dataset_path"]),
+                    markdown_escape(row["kind"]),
+                    row["records"],
+                    row["stale_records"],
+                )
+            )
+        lines.extend(["", "## Entities By Type", "", "| Type | Count |", "|---|---|"])
+        for row in entity_rows:
+            lines.append(f"| {markdown_escape(row['type'])} | {row['count']} |")
+        lines.extend(["", "## Facts By Source", "", "| Source | Facts |", "|---|---|"])
+        for row in fact_rows:
+            lines.append(f"| {markdown_escape(row['dataset_path'])} | {row['facts']} |")
+        lines.append("")
+        self.write_file("company/source-coverage.md", "\n".join(lines), None)
+        return 1
 
     def _write_type_index(
         self, entity_type: str, folder: str, label: str, rows: list[Any]

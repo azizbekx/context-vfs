@@ -11,6 +11,9 @@ def search(store: Store, out_dir: Path, query: str, limit: int = 12) -> list[dic
     terms = [term.lower() for term in query.split() if len(term) > 1]
     if not terms:
         return []
+    fts_results = _fts_search(store, query, limit)
+    if fts_results:
+        return fts_results
     pattern = "%" + "%".join(terms) + "%"
     results: list[dict[str, Any]] = []
 
@@ -87,6 +90,67 @@ def search(store: Store, out_dir: Path, query: str, limit: int = 12) -> list[dic
                     break
 
     return results[:limit]
+
+
+def _fts_query(query: str) -> str:
+    tokens = []
+    for raw in query.replace('"', " ").split():
+        token = "".join(ch for ch in raw if ch.isalnum() or ch in ("_", "-"))
+        if token:
+            tokens.append(f'"{token}"')
+    return " OR ".join(tokens)
+
+
+def _fts_search(store: Store, query: str, limit: int) -> list[dict[str, Any]]:
+    fts_query = _fts_query(query)
+    if not fts_query:
+        return []
+    try:
+        rows = store.rows(
+            """
+            SELECT kind, ref_id, entity_id, path, title,
+                   snippet(search_index, 5, '[', ']', '...', 24) AS snippet,
+                   bm25(search_index) AS rank
+            FROM search_index
+            WHERE search_index MATCH ?
+            ORDER BY rank
+            LIMIT ?
+            """,
+            (fts_query, limit),
+        )
+    except Exception:
+        return []
+
+    results = []
+    for row in rows:
+        result = {
+            "kind": row["kind"],
+            "ref_id": row["ref_id"],
+            "entity_id": row["entity_id"],
+            "path": row["path"],
+            "name": row["title"],
+            "snippet": clean_text(row["snippet"], 280),
+            "rank": row["rank"],
+        }
+        if row["entity_id"]:
+            result["neighbors"] = neighbors(store, row["entity_id"], limit=5)
+        if row["kind"] == "fact":
+            fact = store.row(
+                """
+                SELECT f.predicate, f.confidence, s.dataset_path, s.record_id
+                FROM facts f
+                JOIN source_records s ON s.id = f.source_id
+                WHERE f.id = ?
+                """,
+                (row["ref_id"],),
+            )
+            if fact:
+                result["fact_id"] = row["ref_id"]
+                result["predicate"] = fact["predicate"]
+                result["confidence"] = fact["confidence"]
+                result["source"] = f"{fact['dataset_path']}#{fact['record_id']}"
+        results.append(result)
+    return results
 
 
 def neighbors(store: Store, entity_id: str, limit: int = 20) -> list[dict[str, Any]]:

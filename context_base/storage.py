@@ -104,7 +104,25 @@ class Store:
             CREATE INDEX IF NOT EXISTS idx_facts_source ON facts(source_id);
             CREATE INDEX IF NOT EXISTS idx_edges_from ON edges(from_entity_id);
             CREATE INDEX IF NOT EXISTS idx_edges_to ON edges(to_entity_id);
+
+            CREATE VIRTUAL TABLE IF NOT EXISTS search_index USING fts5(
+                kind,
+                ref_id UNINDEXED,
+                entity_id UNINDEXED,
+                path UNINDEXED,
+                title,
+                body
+            );
             """
+        )
+        self.conn.execute(
+            """
+            INSERT OR IGNORE INTO source_records (
+                id, dataset_path, record_id, record_hash, kind, raw_ref, raw_json,
+                observed_at, last_seen_run, stale
+            ) VALUES ('source:manual', 'manual', 'manual', '', 'manual', 'manual', '{}', ?, ?, 0)
+            """,
+            (now_iso(), now_iso()),
         )
         self.conn.commit()
 
@@ -183,7 +201,21 @@ class Store:
 
     def mark_missing_sources_stale(self, run_id: str) -> None:
         self.conn.execute(
-            "UPDATE source_records SET stale = 1 WHERE last_seen_run != ?", (run_id,)
+            """
+            UPDATE source_records
+            SET last_seen_run = ?, stale = 0
+            WHERE id = 'source:manual'
+            """,
+            (run_id,),
+        )
+        self.conn.execute(
+            """
+            UPDATE source_records
+            SET stale = 1
+            WHERE last_seen_run != ?
+              AND id != 'source:manual'
+            """,
+            (run_id,),
         )
         self.conn.execute(
             """
@@ -192,6 +224,7 @@ class Store:
             WHERE source_id IN (
                 SELECT id FROM source_records WHERE stale = 1
             )
+              AND source_id != 'source:manual'
             """
         )
 
@@ -329,6 +362,49 @@ class Store:
             (path, entity_id, stable_hash(content), now_iso()),
         )
 
+    def rebuild_search_index(self) -> None:
+        self.conn.execute("DELETE FROM search_index")
+        self.conn.execute(
+            """
+            INSERT INTO search_index (kind, ref_id, entity_id, path, title, body)
+            SELECT 'entity', e.id, e.id, e.path, e.name,
+                   e.type || ' ' || COALESCE(e.summary, '') || ' ' || e.aliases_json
+            FROM entities e
+            """
+        )
+        self.conn.execute(
+            """
+            INSERT INTO search_index (kind, ref_id, entity_id, path, title, body)
+            SELECT 'fact', f.id, f.subject_id, e.path,
+                   e.name || ' ' || f.predicate,
+                   f.predicate || ' ' || COALESCE(f.value, '') || ' ' ||
+                   COALESCE(f.object_entity_id, '') || ' ' || s.dataset_path || '#' || s.record_id
+            FROM facts f
+            JOIN entities e ON e.id = f.subject_id
+            JOIN source_records s ON s.id = f.source_id
+            WHERE f.status IN ('generated', 'confirmed')
+            """
+        )
+        vfs_root = self.db_path.parent / "vfs"
+        if vfs_root.exists():
+            rows = []
+            for path in sorted(vfs_root.rglob("*.md")):
+                relative = path.relative_to(vfs_root).as_posix()
+                title = relative
+                text = path.read_text(encoding="utf-8", errors="ignore")
+                for line in text.splitlines():
+                    if line.startswith("# "):
+                        title = line[2:].strip()
+                        break
+                rows.append(("file", relative, None, relative, title, text))
+            self.conn.executemany(
+                """
+                INSERT INTO search_index (kind, ref_id, entity_id, path, title, body)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                rows,
+            )
+
     def upsert_review(
         self,
         *,
@@ -395,6 +471,103 @@ class Store:
         )
         self.conn.commit()
         return True
+
+    def auto_resolve_conflict(self, winner_id: str, loser_ids: list[str]) -> None:
+        self.conn.execute(
+            "UPDATE facts SET status = 'confirmed' WHERE id = ?", (winner_id,)
+        )
+        self.conn.executemany(
+            "UPDATE facts SET status = 'rejected' WHERE id = ?",
+            [(fid,) for fid in loser_ids],
+        )
+
+    def cleanup_stale_facts(self) -> int:
+        fact_ids = [
+            row["id"]
+            for row in self.conn.execute(
+                """
+                SELECT id
+                FROM facts
+                WHERE status = 'stale'
+                  AND source_id != 'source:manual'
+                """
+            )
+        ]
+        if fact_ids:
+            self.conn.executemany(
+                "DELETE FROM edges WHERE source_fact_id = ?",
+                [(fid,) for fid in fact_ids],
+            )
+            self.conn.executemany(
+                "DELETE FROM facts WHERE id = ?",
+                [(fid,) for fid in fact_ids],
+            )
+        return len(fact_ids)
+
+    def cleanup_orphaned_entities(self) -> int:
+        entity_ids = [
+            row["id"]
+            for row in self.conn.execute(
+                """
+                SELECT e.id
+                FROM entities e
+                WHERE NOT EXISTS (
+                    SELECT 1
+                    FROM facts f
+                    WHERE f.subject_id = e.id
+                      AND f.status IN ('generated', 'confirmed')
+                )
+                  AND NOT EXISTS (
+                    SELECT 1
+                    FROM edges edge
+                    JOIN facts f ON f.id = edge.source_fact_id
+                    WHERE edge.to_entity_id = e.id
+                      AND f.status IN ('generated', 'confirmed')
+                )
+                  AND NOT EXISTS (
+                    SELECT 1
+                    FROM edges edge
+                    JOIN facts f ON f.id = edge.source_fact_id
+                    WHERE edge.from_entity_id = e.id
+                      AND f.status IN ('generated', 'confirmed')
+                )
+                """
+            )
+        ]
+        for entity_id in entity_ids:
+            self.delete_entity(entity_id)
+        return len(entity_ids)
+
+    def delete_fact(self, fact_id: str) -> bool:
+        self.conn.execute(
+            "DELETE FROM edges WHERE source_fact_id = ?", (fact_id,)
+        )
+        cursor = self.conn.execute(
+            "DELETE FROM facts WHERE id = ?", (fact_id,)
+        )
+        return cursor.rowcount > 0
+
+    def delete_entity(self, entity_id: str) -> bool:
+        fact_ids = [
+            row["id"]
+            for row in self.conn.execute(
+                "SELECT id FROM facts WHERE subject_id = ?", (entity_id,)
+            )
+        ]
+        for fid in fact_ids:
+            self.conn.execute(
+                "DELETE FROM edges WHERE source_fact_id = ?", (fid,)
+            )
+        self.conn.execute(
+            "DELETE FROM facts WHERE subject_id = ?", (entity_id,)
+        )
+        self.conn.execute(
+            "DELETE FROM edges WHERE to_entity_id = ?", (entity_id,)
+        )
+        cursor = self.conn.execute(
+            "DELETE FROM entities WHERE id = ?", (entity_id,)
+        )
+        return cursor.rowcount > 0
 
     def rows(self, query: str, params: tuple[Any, ...] = ()) -> list[sqlite3.Row]:
         return list(self.conn.execute(query, params))

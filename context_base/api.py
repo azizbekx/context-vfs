@@ -1,10 +1,10 @@
-from __future__ import annotations
-
 from pathlib import Path
+from typing import Any, Optional
 
 from .search import neighbors, search
 from .storage import Store
-from .vfs import tree
+from .utils import now_iso
+from .vfs import VFSGenerator, tree
 
 
 def create_app(db_path: Path, out_dir: Path):
@@ -22,10 +22,30 @@ def create_app(db_path: Path, out_dir: Path):
     class ResolveBody(BaseModel):
         choice: str
 
+    class CreateEntityBody(BaseModel):
+        entity_id: str
+        entity_type: str
+        name: str
+        path: Optional[str] = None
+        summary: Optional[str] = None
+
+    class AddFactBody(BaseModel):
+        predicate: str
+        value: Optional[str] = None
+        object_entity_id: Optional[str] = None
+        confidence: float = 1.0
+
+    class EditFactBody(BaseModel):
+        value: Optional[str] = None
+        confidence: Optional[float] = None
+
     def store() -> Store:
         db = Store(db_path)
         db.init_schema()
         return db
+
+    def refresh_vfs(db: Store) -> int:
+        return VFSGenerator(db, out_dir).generate()
 
     @app.get("/", response_class=HTMLResponse)
     def index():
@@ -137,7 +157,121 @@ def create_app(db_path: Path, out_dir: Path):
         try:
             if not db.resolve_review(review_id, body.choice):
                 raise HTTPException(status_code=404, detail="Review or choice not found")
-            return {"ok": True}
+            files_generated = refresh_vfs(db)
+            return {"ok": True, "files_generated": files_generated}
+        finally:
+            db.close()
+
+    @app.post("/entities")
+    def create_entity(body: CreateEntityBody):
+        db = store()
+        try:
+            existing = db.row("SELECT id FROM entities WHERE id = ?", (body.entity_id,))
+            if existing:
+                raise HTTPException(status_code=409, detail="Entity already exists")
+            entity_path = body.path or f"company/{body.entity_type}s/{body.entity_id.replace(':', '-')}.md"
+            db.upsert_entity(
+                entity_id=body.entity_id,
+                entity_type=body.entity_type,
+                name=body.name,
+                path=entity_path,
+                summary=body.summary,
+            )
+            db.commit()
+            files_generated = refresh_vfs(db)
+            return {
+                "ok": True,
+                "entity_id": body.entity_id,
+                "path": entity_path,
+                "files_generated": files_generated,
+            }
+        finally:
+            db.close()
+
+    @app.post("/entities/{entity_id:path}/facts")
+    def add_fact(entity_id: str, body: AddFactBody):
+        db = store()
+        try:
+            entity = db.row("SELECT * FROM entities WHERE id = ?", (entity_id,))
+            if not entity:
+                raise HTTPException(status_code=404, detail="Entity not found")
+            fact_id = db.upsert_fact(
+                subject_id=entity_id,
+                predicate=body.predicate,
+                source_id="source:manual",
+                run_id="manual",
+                value=body.value,
+                object_entity_id=body.object_entity_id,
+                confidence=body.confidence,
+                status="confirmed",
+                extraction_method="manual",
+            )
+            db.commit()
+            files_generated = refresh_vfs(db)
+            return {"ok": True, "fact_id": fact_id, "files_generated": files_generated}
+        finally:
+            db.close()
+
+    @app.patch("/facts/{fact_id:path}")
+    def edit_fact(fact_id: str, body: EditFactBody):
+        db = store()
+        try:
+            existing = db.row("SELECT * FROM facts WHERE id = ?", (fact_id,))
+            if not existing:
+                raise HTTPException(status_code=404, detail="Fact not found")
+            updates = []
+            params: list[Any] = []
+            if body.value is not None:
+                updates.append("value = ?")
+                params.append(body.value)
+            if body.confidence is not None:
+                updates.append("confidence = ?")
+                params.append(body.confidence)
+            if not updates:
+                raise HTTPException(status_code=400, detail="No updates provided")
+            updates.append("status = 'confirmed'")
+            updates.append("updated_at = ?")
+            params.append(now_iso())
+            params.append(fact_id)
+            db.conn.execute(
+                f"UPDATE facts SET {', '.join(updates)} WHERE id = ?", params
+            )
+            db.commit()
+            files_generated = refresh_vfs(db)
+            return {"ok": True, "files_generated": files_generated}
+        finally:
+            db.close()
+
+    @app.delete("/facts/{fact_id:path}")
+    def delete_fact(fact_id: str):
+        db = store()
+        try:
+            if not db.delete_fact(fact_id):
+                raise HTTPException(status_code=404, detail="Fact not found")
+            db.commit()
+            files_generated = refresh_vfs(db)
+            return {"ok": True, "files_generated": files_generated}
+        finally:
+            db.close()
+
+    @app.delete("/entities/{entity_id:path}")
+    def delete_entity(entity_id: str):
+        db = store()
+        try:
+            if not db.delete_entity(entity_id):
+                raise HTTPException(status_code=404, detail="Entity not found")
+            db.commit()
+            files_generated = refresh_vfs(db)
+            return {"ok": True, "files_generated": files_generated}
+        finally:
+            db.close()
+
+    @app.post("/vfs/refresh")
+    def vfs_refresh():
+        db = store()
+        try:
+            count = refresh_vfs(db)
+            return {"ok": True, "files_generated": count}
         finally:
             db.close()
 
@@ -514,6 +648,32 @@ CONTEXT_BROWSER_HTML = r"""
         padding: 18px;
       }
     }
+    .modal-overlay {
+      position: fixed;
+      inset: 0;
+      background: rgba(16,24,40,0.4);
+      z-index: 20;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+    .modal {
+      background: var(--panel);
+      border-radius: 8px;
+      padding: 20px;
+      width: min(480px, calc(100vw - 48px));
+      box-shadow: 0 18px 48px rgba(16,24,40,0.22);
+    }
+    .modal h3 { margin: 0 0 14px; font-size: 16px; }
+    .modal .field { margin-bottom: 10px; }
+    .modal .field label { display: block; font-size: 12px; color: var(--muted); margin-bottom: 4px; }
+    .modal .field input, .modal .field textarea, .modal .field select { width: 100%; }
+    .modal .actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 16px; }
+    .btn-sm { height: 26px; font-size: 11px; padding: 0 7px; border-radius: 4px; }
+    .btn-danger { color: var(--danger); border-color: var(--danger); }
+    .btn-danger:hover { background: #fef2f2; }
+    .add-btn { display: block; width: 100%; margin-top: 8px; font-size: 12px; color: var(--accent); border-style: dashed; }
+  
   </style>
 </head>
 <body>
@@ -556,8 +716,11 @@ CONTEXT_BROWSER_HTML = r"""
     </section>
 
     <aside class="inspector">
+      <section class="inspector-section" style="display:flex;justify-content:space-between;align-items:center">
+        <h2 style="margin:0">Entity</h2>
+        <button id="newEntityBtn" class="btn-sm primary" style="display:none">+ New Entity</button>
+      </section>
       <section class="inspector-section">
-        <h2>Entity</h2>
         <div id="entityDetails" class="muted">No entity selected.</div>
       </section>
       <section class="inspector-section">
@@ -565,8 +728,18 @@ CONTEXT_BROWSER_HTML = r"""
         <div id="graphView" class="graph muted">No graph loaded.</div>
       </section>
       <section class="inspector-section">
-        <h2>Facts</h2>
-        <div id="factsView" class="muted">No facts loaded.</div>
+        <div style="display:flex;justify-content:space-between;align-items:center">
+          <h2 style="margin:0">Facts</h2>
+          <button id="addFactBtn" class="btn-sm primary" style="display:none">+ Add Fact</button>
+        </div>
+        <div id="factsView" class="muted" style="margin-top:10px">No facts loaded.</div>
+      </section>
+      <section class="inspector-section">
+        <div style="display:flex;justify-content:space-between;align-items:center">
+          <h2 style="margin:0">Open Reviews</h2>
+          <button id="reloadReviewsBtn" class="btn-sm">Reload</button>
+        </div>
+        <div id="reviewsView" class="muted" style="margin-top:10px">No reviews loaded.</div>
       </section>
     </aside>
   </main>
@@ -579,11 +752,25 @@ CONTEXT_BROWSER_HTML = r"""
     <pre id="sourceContent"></pre>
   </section>
 
+  <div id="modalOverlay" class="modal-overlay" style="display:none">
+    <div class="modal">
+      <h3 id="modalTitle">Edit</h3>
+      <div id="modalBody"></div>
+      <div class="actions">
+        <button id="modalCancel">Cancel</button>
+        <button id="modalSave" class="primary">Save</button>
+      </div>
+    </div>
+  </div>
+
   <script>
     const state = {
       files: [],
       selectedPath: null,
       selectedEntityId: null,
+      currentFacts: [],
+      currentReviews: [],
+      modalSubmit: null,
       rawMarkdown: "",
       mode: "preview"
     };
@@ -597,6 +784,14 @@ CONTEXT_BROWSER_HTML = r"""
         throw new Error(`${response.status} ${text}`);
       }
       return response.json();
+    }
+
+    async function refreshVfsAndSelection(path = state.selectedPath) {
+      await api("/vfs/refresh", { method: "POST" });
+      await loadTree();
+      if (path) {
+        await openFile(path);
+      }
     }
 
     function escapeHtml(value) {
@@ -718,6 +913,8 @@ CONTEXT_BROWSER_HTML = r"""
       const payload = await api("/vfs/tree");
       state.files = payload.files || [];
       renderTree();
+      byId("newEntityBtn").style.display = "inline-flex";
+      await loadReviews();
     }
 
     async function openFile(path) {
@@ -739,6 +936,7 @@ CONTEXT_BROWSER_HTML = r"""
     async function loadEntity(entityId) {
       const payload = await api(`/entities/${encodeURIComponent(entityId)}`);
       const entity = payload.entity;
+      state.selectedEntityId = entity.id;
       byId("entityDetails").innerHTML = `
         <div class="kv">
           <div class="key">ID</div><div class="value"><code>${escapeHtml(entity.id)}</code></div>
@@ -747,6 +945,7 @@ CONTEXT_BROWSER_HTML = r"""
           <div class="key">Path</div><div class="value">${escapeHtml(entity.path || "none")}</div>
         </div>
       `;
+      byId("addFactBtn").style.display = "inline-flex";
       renderFacts(payload.facts || []);
       const graphPayload = await api(`/entities/${encodeURIComponent(entityId)}/neighbors`);
       renderGraph(graphPayload.neighbors || []);
@@ -768,9 +967,10 @@ CONTEXT_BROWSER_HTML = r"""
     }
 
     function renderFacts(facts) {
+      state.currentFacts = facts;
       const target = byId("factsView");
       if (!facts.length) {
-        target.innerHTML = "No facts.";
+        target.innerHTML = "<div class=\"muted\">No facts.</div>";
         return;
       }
       target.classList.remove("muted");
@@ -778,9 +978,159 @@ CONTEXT_BROWSER_HTML = r"""
         <div class="fact">
           <div><strong>${escapeHtml(fact.predicate)}</strong></div>
           <div class="muted">${escapeHtml(fact.value || fact.object_entity_id || "")}</div>
-          <button data-fact="${escapeHtml(fact.id)}">Source</button>
+          <button class="btn-sm" data-fact="${escapeHtml(fact.id)}">Source</button>
+          <button class="btn-sm" data-action="edit-fact" data-fact="${escapeHtml(fact.id)}">Edit</button>
+          <button class="btn-sm btn-danger" data-action="delete-fact" data-fact="${escapeHtml(fact.id)}">Delete</button>
         </div>
       `).join("");
+    }
+
+    function openModal(title, bodyHtml, onSubmit) {
+      byId("modalTitle").textContent = title;
+      byId("modalBody").innerHTML = bodyHtml;
+      state.modalSubmit = onSubmit;
+      byId("modalOverlay").style.display = "flex";
+    }
+
+    function closeModal() {
+      byId("modalOverlay").style.display = "none";
+      byId("modalBody").innerHTML = "";
+      state.modalSubmit = null;
+    }
+
+    function inputValue(id) {
+      return byId(id)?.value?.trim() || "";
+    }
+
+    function numberValue(id, fallback = 1) {
+      const raw = inputValue(id);
+      if (!raw) return fallback;
+      const parsed = Number(raw);
+      return Number.isFinite(parsed) ? parsed : fallback;
+    }
+
+    function openNewEntityModal() {
+      openModal("New Entity", `
+        <div class="field"><label>Entity ID</label><input id="newEntityId" placeholder="project:acme-renewal-2026" /></div>
+        <div class="field"><label>Type</label><input id="newEntityType" placeholder="project" /></div>
+        <div class="field"><label>Name</label><input id="newEntityName" placeholder="ACME renewal 2026" /></div>
+        <div class="field"><label>Path</label><input id="newEntityPath" placeholder="company/projects/acme-renewal-2026.md" /></div>
+        <div class="field"><label>Summary</label><textarea id="newEntitySummary" rows="3"></textarea></div>
+      `, async () => {
+        const entityId = inputValue("newEntityId");
+        const entityType = inputValue("newEntityType");
+        const name = inputValue("newEntityName");
+        if (!entityId || !entityType || !name) {
+          throw new Error("Entity ID, type, and name are required.");
+        }
+        const payload = {
+          entity_id: entityId,
+          entity_type: entityType,
+          name,
+          path: inputValue("newEntityPath") || null,
+          summary: inputValue("newEntitySummary") || null
+        };
+        const created = await api("/entities", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload)
+        });
+        closeModal();
+        await refreshVfsAndSelection(created.path);
+      });
+    }
+
+    function openAddFactModal() {
+      if (!state.selectedEntityId) return;
+      openModal("Add Fact", `
+        <div class="field"><label>Predicate</label><input id="factPredicate" placeholder="status" /></div>
+        <div class="field"><label>Value</label><textarea id="factValue" rows="3"></textarea></div>
+        <div class="field"><label>Target Entity ID</label><input id="factTarget" placeholder="employee:emp_0431" /></div>
+        <div class="field"><label>Confidence</label><input id="factConfidence" value="1.0" /></div>
+      `, async () => {
+        const predicate = inputValue("factPredicate");
+        if (!predicate) {
+          throw new Error("Predicate is required.");
+        }
+        await api(`/entities/${encodeURIComponent(state.selectedEntityId)}/facts`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            predicate,
+            value: inputValue("factValue") || null,
+            object_entity_id: inputValue("factTarget") || null,
+            confidence: numberValue("factConfidence", 1)
+          })
+        });
+        closeModal();
+        await refreshVfsAndSelection();
+      });
+    }
+
+    function openEditFactModal(factId) {
+      const fact = state.currentFacts.find(item => item.id === factId);
+      if (!fact) return;
+      openModal("Edit Fact", `
+        <div class="field"><label>Predicate</label><input value="${escapeHtml(fact.predicate)}" disabled /></div>
+        <div class="field"><label>Value</label><textarea id="editFactValue" rows="4">${escapeHtml(fact.value || "")}</textarea></div>
+        <div class="field"><label>Confidence</label><input id="editFactConfidence" value="${escapeHtml(fact.confidence ?? 1)}" /></div>
+      `, async () => {
+        await api(`/facts/${encodeURIComponent(factId)}`, {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            value: inputValue("editFactValue"),
+            confidence: numberValue("editFactConfidence", fact.confidence ?? 1)
+          })
+        });
+        closeModal();
+        await refreshVfsAndSelection();
+      });
+    }
+
+    async function deleteFact(factId) {
+      if (!confirm("Delete this fact from the context base?")) return;
+      await api(`/facts/${encodeURIComponent(factId)}`, { method: "DELETE" });
+      await refreshVfsAndSelection();
+    }
+
+    async function loadReviews() {
+      const payload = await api("/reviews");
+      state.currentReviews = (payload.reviews || []).filter(item => item.status === "open");
+      renderReviews();
+    }
+
+    function renderReviews() {
+      const target = byId("reviewsView");
+      if (!state.currentReviews.length) {
+        target.innerHTML = "<div class=\"muted\">No open reviews.</div>";
+        return;
+      }
+      target.innerHTML = state.currentReviews.slice(0, 12).map(review => {
+        let choices = [];
+        try { choices = JSON.parse(review.candidates_json || "[]"); } catch (_) {}
+        return `
+          <div class="fact">
+            <div><strong>${escapeHtml(review.predicate)}</strong></div>
+            <div class="muted">${escapeHtml(review.entity_id)} · ${escapeHtml(review.conflict_type)}</div>
+            ${choices.map(choice => `
+              <button class="btn-sm" data-action="resolve-review" data-review="${escapeHtml(review.id)}" data-choice="${escapeHtml(choice.choice_id)}">
+                ${escapeHtml(choice.choice_id)}
+              </button>
+            `).join("")}
+          </div>
+        `;
+      }).join("");
+    }
+
+    async function resolveReview(reviewId, choice) {
+      await api(`/reviews/${encodeURIComponent(reviewId)}/resolve`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ choice })
+      });
+      await refreshVfsAndSelection();
+      await loadReviews();
     }
 
     async function runSearch() {
@@ -809,6 +1159,15 @@ CONTEXT_BROWSER_HTML = r"""
     }
 
     document.addEventListener("click", async (event) => {
+      const actionButton = event.target.closest("[data-action]");
+      if (actionButton) {
+        const action = actionButton.dataset.action;
+        const factId = actionButton.dataset.fact;
+        if (action === "edit-fact" && factId) openEditFactModal(factId);
+        if (action === "delete-fact" && factId) await deleteFact(factId);
+        if (action === "resolve-review") await resolveReview(actionButton.dataset.review, actionButton.dataset.choice);
+        return;
+      }
       const pathButton = event.target.closest("[data-path]");
       if (pathButton) {
         const path = pathButton.dataset.path;
@@ -842,6 +1201,18 @@ CONTEXT_BROWSER_HTML = r"""
     byId("refreshButton").addEventListener("click", async () => {
       await loadTree();
       if (state.selectedPath) await openFile(state.selectedPath);
+    });
+    byId("newEntityBtn").addEventListener("click", openNewEntityModal);
+    byId("addFactBtn").addEventListener("click", openAddFactModal);
+    byId("reloadReviewsBtn").addEventListener("click", loadReviews);
+    byId("modalCancel").addEventListener("click", closeModal);
+    byId("modalSave").addEventListener("click", async () => {
+      if (!state.modalSubmit) return;
+      try {
+        await state.modalSubmit();
+      } catch (error) {
+        alert(error.message);
+      }
     });
     byId("closeSource").addEventListener("click", () => {
       byId("sourcePanel").classList.remove("open");
