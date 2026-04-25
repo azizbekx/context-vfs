@@ -1,0 +1,418 @@
+import React, { useState, useEffect } from 'react';
+import { 
+  Folder, FileText, ChevronRight, ChevronDown, 
+  Search, Hexagon, Layers, Settings, Activity
+} from 'lucide-react';
+import { motion } from 'framer-motion';
+import { fetchTree, fetchEntity, fetchNeighbors, fetchFile } from './api';
+
+// Utilities for VFS parsing
+function buildTree(paths: string[]) {
+  const root: any = { id: 'root', name: 'Company Data', type: 'folder', children: [], isOpen: true };
+  const nodeMap = new Map<string, any>();
+  nodeMap.set('root', root);
+  
+  for (const path of paths) {
+    const parts = path.split('/');
+    let currentId = 'root';
+    let current = root;
+    
+    for (let i = 0; i < parts.length; i++) {
+      const part = parts[i];
+      const isFile = i === parts.length - 1;
+      const nodeId = currentId === 'root' ? part : `${currentId}/${part}`;
+      
+      let existing = nodeMap.get(nodeId);
+      
+      if (!existing) {
+        existing = {
+          id: nodeId,
+          name: part,
+          type: isFile ? 'file' : 'folder',
+          children: isFile ? undefined : [],
+          isOpen: false,
+          originalPath: isFile ? path : undefined
+        };
+        nodeMap.set(nodeId, existing);
+        current.children.push(existing);
+      }
+      currentId = nodeId;
+      current = existing;
+    }
+  }
+  return root.children;
+}
+
+export default function App() {
+  const [treeData, setTreeData] = useState<any[]>([]);
+  const [selectedNode, setSelectedNode] = useState<any | null>(null);
+  const [entityData, setEntityData] = useState<any | null>(null);
+  const [neighborsData, setNeighborsData] = useState<any[]>([]);
+  const [searchQuery, setSearchQuery] = useState('');
+  const [loading, setLoading] = useState(false);
+  const [fileContent, setFileContent] = useState<string | null>(null);
+
+  useEffect(() => {
+    fetchTree().then(data => {
+      if (data && data.files) {
+        setTreeData(buildTree(data.files));
+      }
+    }).catch(console.error);
+  }, []);
+
+  const handleSelectNode = async (node: any) => {
+    setSelectedNode(node);
+    setEntityData(null);
+    setNeighborsData([]);
+    setFileContent(null);
+    
+    if (node.type === 'file') {
+      let entityId: string | null = null;
+      
+      if (node.originalPath) {
+        const parts = node.originalPath.split('/');
+        if (parts.length >= 3) {
+          const typePlural = parts[1];
+          const filename = parts[parts.length - 1].replace(/\.md$/, '');
+          const typeMap: Record<string, string> = {
+            'employees': 'employee',
+            'customers': 'customer',
+            'products': 'product',
+            'sales': 'sale',
+            'sentiment': 'sentiment',
+            'support-chats': 'support_chat',
+            'tickets': 'ticket',
+            'clients': 'client',
+            'vendors': 'vendor',
+            'email-threads': 'email_thread',
+            'conversations': 'conversation',
+            'posts': 'social_post',
+            'repos': 'repo'
+          };
+          if (typeMap[typePlural]) {
+            entityId = `${typeMap[typePlural]}:${filename}`;
+          }
+        }
+      }
+
+      setLoading(true);
+      try {
+        if (entityId) {
+          const eData = await fetchEntity(entityId);
+          setEntityData(eData);
+          const nData = await fetchNeighbors(entityId);
+          setNeighborsData(nData.neighbors || []);
+        } else if (node.originalPath) {
+          // If it's not an entity (like review.md or index.md), fetch the raw file
+          const fData = await fetchFile(node.originalPath);
+          setFileContent(fData.content);
+        }
+      } catch (e) {
+        console.error("Failed to load", e);
+      } finally {
+        setLoading(false);
+      }
+    }
+  };
+
+  return (
+    <div className="app-container">
+      {/* Left Sidebar - VFS */}
+      <motion.div 
+        initial={{ opacity: 0, x: -20 }}
+        animate={{ opacity: 1, x: 0 }}
+        className="sidebar-left glass-panel"
+        style={{ padding: '20px' }}
+      >
+        <div className="app-header">
+          <div className="logo-area">
+            <Hexagon size={24} color="var(--accent-cyan)" />
+            <span>Qontext AI</span>
+          </div>
+        </div>
+
+        <div style={{ position: 'relative', marginBottom: '24px' }}>
+          <Search size={16} style={{ position: 'absolute', left: '12px', top: '10px', color: 'var(--text-tertiary)' }} />
+          <input 
+            type="text" 
+            placeholder="Search company memory..."
+            value={searchQuery}
+            onChange={e => setSearchQuery(e.target.value)}
+            style={{
+              width: '100%',
+              padding: '8px 12px 8px 36px',
+              background: 'rgba(0,0,0,0.2)',
+              border: '1px solid var(--border-subtle)',
+              borderRadius: '8px',
+              color: 'var(--text-primary)',
+              outline: 'none',
+              fontSize: '0.875rem'
+            }}
+          />
+        </div>
+
+        <div className="heading-sm">Virtual File System</div>
+        
+        <div className="tree-container" style={{ flex: 1, overflowY: 'auto' }}>
+          {treeData.map(node => (
+            <TreeNode key={node.id} node={node} level={0} onSelect={handleSelectNode} selectedId={selectedNode?.id} />
+          ))}
+          {treeData.length === 0 && <div style={{ color: 'var(--text-secondary)', fontSize: '0.875rem' }}>Loading VFS...</div>}
+        </div>
+
+        <div style={{ marginTop: 'auto', paddingTop: '20px', borderTop: '1px solid var(--border-subtle)' }}>
+          <div className="tree-item"><Settings size={16} /> Settings</div>
+        </div>
+      </motion.div>
+
+      {/* Main Content - Graph */}
+      <motion.div 
+        initial={{ opacity: 0, y: 20 }}
+        animate={{ opacity: 1, y: 0 }}
+        transition={{ delay: 0.1 }}
+        className="main-content glass-panel"
+      >
+        <div style={{ padding: '20px', borderBottom: '1px solid var(--border-subtle)', display: 'flex', justifyContent: 'space-between', alignItems: 'center', zIndex: 10 }}>
+          <h2 style={{ margin: 0, fontSize: '1.25rem', color: 'var(--text-primary)' }}>Context Graph</h2>
+          <div style={{ display: 'flex', gap: '8px' }}>
+            <button style={{ background: 'var(--bg-surface)', border: '1px solid var(--border-subtle)', padding: '6px 12px', borderRadius: '6px', color: 'var(--text-primary)', cursor: 'pointer' }}>
+              <Layers size={14} style={{ display: 'inline', marginRight: '6px', verticalAlign: 'middle' }} />
+              Filter By Type
+            </button>
+          </div>
+        </div>
+        
+        <div className="graph-canvas" style={{ position: 'relative', overflow: 'hidden', flex: 1, display: 'flex', flexDirection: 'column' }}>
+          {fileContent && !entityData && !loading ? (
+            <div style={{ padding: '24px', overflowY: 'auto', flex: 1, whiteSpace: 'pre-wrap', color: 'var(--text-primary)', fontFamily: 'monospace', fontSize: '0.9rem', lineHeight: '1.5' }}>
+              {fileContent}
+            </div>
+          ) : (
+            <InteractiveGraph entityData={entityData} neighbors={neighborsData} loading={loading} />
+          )}
+        </div>
+      </motion.div>
+
+      {/* Right Sidebar - Properties */}
+      <motion.div 
+        initial={{ opacity: 0, x: 20 }}
+        animate={{ opacity: 1, x: 0 }}
+        transition={{ delay: 0.2 }}
+        className="sidebar-right glass-panel"
+        style={{ padding: '20px', display: 'flex', flexDirection: 'column' }}
+      >
+        <div className="heading-sm">Inspector</div>
+        
+        {!entityData && !fileContent && !loading ? (
+          <div style={{ textAlign: 'center', color: 'var(--text-secondary)', marginTop: '40px', fontSize: '0.875rem' }}>
+            <Activity size={32} style={{ opacity: 0.5, margin: '0 auto 16px' }} />
+            <div>Select a file to inspect its entity and provenance.</div>
+          </div>
+        ) : null}
+
+        {fileContent && !entityData && (
+          <div style={{ textAlign: 'center', color: 'var(--text-secondary)', marginTop: '40px', fontSize: '0.875rem' }}>
+            <FileText size={32} style={{ opacity: 0.5, margin: '0 auto 16px' }} />
+            <div>Viewing plain markdown file.</div>
+          </div>
+        )}
+
+        {entityData && (
+          <div style={{ flex: 1, overflowY: 'auto', paddingRight: '4px' }}>
+            <div style={{ textAlign: 'center', marginBottom: '24px', padding: '20px 0', borderBottom: '1px solid var(--border-subtle)' }}>
+              <div style={{ width: '48px', height: '48px', background: 'rgba(0, 229, 255, 0.1)', color: 'var(--accent-cyan)', borderRadius: '12px', display: 'flex', alignItems: 'center', justifyContent: 'center', margin: '0 auto 12px' }}>
+                <Hexagon size={24} />
+              </div>
+              <h3 style={{ margin: '0 0 4px 0', color: 'var(--text-primary)' }}>{entityData.entity.name}</h3>
+              <div style={{ fontSize: '0.875rem', color: 'var(--text-secondary)' }}>{entityData.entity.type.toUpperCase()}</div>
+            </div>
+
+            <div className="prop-group">
+              <div className="heading-sm">Properties</div>
+              <div className="prop-row">
+                <span className="prop-label">ID</span>
+                <span className="prop-value" style={{ fontSize: '0.75rem', maxWidth: '180px', wordBreak: 'break-all' }}>{entityData.entity.id}</span>
+              </div>
+              {entityData.entity.summary && (
+                <div style={{ marginTop: '12px', fontSize: '0.875rem', color: 'var(--text-secondary)', lineHeight: 1.5 }}>
+                  {entityData.entity.summary}
+                </div>
+              )}
+            </div>
+
+            <div className="prop-group">
+              <div className="heading-sm">Provenance (Facts)</div>
+              {entityData.facts.map((fact: any) => (
+                <ProvenanceItem 
+                  key={fact.id}
+                  source={fact.source_id.split(':')[0]} 
+                  fact={`${fact.predicate}: ${fact.value || fact.object_entity_id}`} 
+                  confidence={Math.round(fact.confidence * 100)} 
+                />
+              ))}
+              {entityData.facts.length === 0 && <div style={{ fontSize: '0.875rem', color: 'var(--text-secondary)' }}>No facts available.</div>}
+            </div>
+          </div>
+        )}
+      </motion.div>
+    </div>
+  );
+}
+
+// Custom Interactive Graph
+function InteractiveGraph({ entityData, neighbors, loading }: { entityData: any, neighbors: any[], loading: boolean }) {
+  if (loading) {
+    return (
+      <div style={{ position: 'absolute', top: '50%', left: '50%', transform: 'translate(-50%, -50%)' }}>
+        <motion.div
+          animate={{ rotate: 360, scale: [1, 1.2, 1] }}
+          transition={{ duration: 2, repeat: Infinity }}
+          style={{ width: '60px', height: '60px', borderRadius: '50%', border: '2px dashed var(--accent-cyan)' }}
+        />
+      </div>
+    );
+  }
+
+  if (!entityData) {
+    return null;
+  }
+
+  return (
+    <div style={{ width: '100%', height: '100%', position: 'relative' }}>
+      <svg style={{ position: 'absolute', top: 0, left: 0, width: '100%', height: '100%', pointerEvents: 'none' }}>
+        <defs>
+          <linearGradient id="lineGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+            <stop offset="0%" stopColor="var(--accent-cyan)" stopOpacity="0.5" />
+            <stop offset="100%" stopColor="var(--accent-purple)" stopOpacity="0.5" />
+          </linearGradient>
+        </defs>
+        {neighbors.map((n, i) => {
+          const angle = (i / neighbors.length) * Math.PI * 2;
+          const radius = 180;
+          const x2 = 400 + Math.cos(angle) * radius;
+          const y2 = 300 + Math.sin(angle) * radius;
+          return (
+            <motion.line
+              key={n.id || i}
+              initial={{ opacity: 0, pathLength: 0 }}
+              animate={{ opacity: 1, pathLength: 1 }}
+              transition={{ duration: 1, delay: i * 0.1 }}
+              x1="400" y1="300" x2={x2} y2={y2}
+              stroke="url(#lineGrad)"
+              strokeWidth="2"
+            />
+          );
+        })}
+      </svg>
+
+      {/* Central Node */}
+      <motion.div 
+        initial={{ scale: 0 }}
+        animate={{ scale: 1 }}
+        style={{
+          position: 'absolute', left: '400px', top: '300px', transform: 'translate(-50%, -50%)',
+          background: 'rgba(0, 229, 255, 0.1)', border: '1px solid var(--accent-cyan)',
+          padding: '16px 24px', borderRadius: '12px', zIndex: 10, boxShadow: '0 0 30px rgba(0, 229, 255, 0.2)'
+        }}
+      >
+        <h3 style={{ margin: 0, color: 'var(--accent-cyan)' }}>{entityData.entity.name}</h3>
+      </motion.div>
+
+      {/* Neighbor Nodes */}
+      {neighbors.map((n, i) => {
+        const angle = (i / neighbors.length) * Math.PI * 2;
+        const radius = 180;
+        const x = 400 + Math.cos(angle) * radius;
+        const y = 300 + Math.sin(angle) * radius;
+        return (
+          <motion.div
+            key={n.id || i}
+            initial={{ opacity: 0, scale: 0 }}
+            animate={{ opacity: 1, scale: 1 }}
+            transition={{ delay: 0.5 + i * 0.1 }}
+            whileHover={{ scale: 1.1, zIndex: 20 }}
+            style={{
+              position: 'absolute', left: `${x}px`, top: `${y}px`, transform: 'translate(-50%, -50%)',
+              background: 'var(--bg-surface)', border: '1px solid var(--border-subtle)',
+              padding: '8px 12px', borderRadius: '20px', fontSize: '0.75rem',
+              color: 'var(--text-primary)', cursor: 'pointer', zIndex: 5,
+              whiteSpace: 'nowrap', textOverflow: 'ellipsis', overflow: 'hidden', maxWidth: '150px'
+            }}
+          >
+            {n.name}
+          </motion.div>
+        );
+      })}
+    </div>
+  );
+}
+
+function TreeNode({ node, level, onSelect, selectedId }: { node: any, level: number, onSelect: (n: any) => void, selectedId?: string }) {
+  const [isOpen, setIsOpen] = useState(node.isOpen || false);
+  const isFolder = node.type === 'folder';
+  const isActive = node.id === selectedId;
+  const DISPLAY_LIMIT = 100;
+
+  const handleClick = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    if (isFolder) setIsOpen(!isOpen);
+    else onSelect(node);
+  };
+
+  return (
+    <div>
+      <div 
+        className={`tree-item ${isActive ? 'active' : ''}`}
+        style={{ paddingLeft: `${level * 16 + 12}px`, userSelect: 'none' }}
+        onClick={handleClick}
+      >
+        {isFolder ? (
+          isOpen ? <ChevronDown size={14} /> : <ChevronRight size={14} />
+        ) : (
+          <span style={{ width: 14, display: 'inline-block' }} />
+        )}
+        
+        {isFolder ? (
+          <Folder size={14} color="var(--accent-blue)" style={{ minWidth: 14 }} />
+        ) : (
+          <FileText size={14} color="var(--text-secondary)" style={{ minWidth: 14 }} />
+        )}
+        
+        <span style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }} title={node.name}>
+          {node.name}
+        </span>
+      </div>
+      
+      {isFolder && isOpen && node.children && (
+        <div style={{ display: 'block' }}>
+          {node.children.slice(0, DISPLAY_LIMIT).map((child: any) => (
+            <TreeNode key={child.id} node={child} level={level + 1} onSelect={onSelect} selectedId={selectedId} />
+          ))}
+          {node.children.length > DISPLAY_LIMIT && (
+            <div style={{ 
+              paddingLeft: `${(level + 1) * 16 + 12}px`, 
+              color: 'var(--text-tertiary)', 
+              fontSize: '0.75rem', 
+              paddingTop: '6px',
+              paddingBottom: '6px'
+            }}>
+              + {node.children.length - DISPLAY_LIMIT} more items
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ProvenanceItem({ source, fact, confidence }: { source: string, fact: string, confidence: number }) {
+  return (
+    <div style={{ background: 'var(--bg-surface)', padding: '10px', borderRadius: '8px', marginBottom: '8px', border: '1px solid var(--border-subtle)' }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '4px' }}>
+        <span style={{ fontSize: '0.75rem', color: 'var(--accent-cyan)', textTransform: 'uppercase' }}>{source}</span>
+        <span style={{ fontSize: '0.75rem', color: confidence >= 90 ? '#4caf50' : '#ff9800' }}>{confidence}%</span>
+      </div>
+      <div style={{ fontSize: '0.875rem', color: 'var(--text-primary)', wordBreak: 'break-word' }}>{fact}</div>
+    </div>
+  );
+}

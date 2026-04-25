@@ -1,0 +1,120 @@
+{
+  "sources": [
+    {
+      "path": "Customer_Relation_Management/customers.json",
+      "format": "json",
+      "id_field": "customer_id",
+      "entity_type": "customer",
+      "name_field": "customer_name",
+      "path_template": "company/customers/{customer_id}.md",
+      "facts": [
+        {"field": "customer_name", "predicate": "name"},
+        {"field": "invoice_paths", "predicate": "invoice_paths"},
+        {"field": "purchase_order_paths", "predicate": "purchase_order_paths"},
+        {"field": "shipping_order_paths", "predicate": "shipping_order_paths"}
+      ]
+    },
+    {
+      "path": "Customer_Relation_Management/products.json",
+      "format": "json",
+      "id_field": "product_id",
+      "entity_type": "product",
+      "name_field": "product_name",
+      "summary_field": "about_product",
+      "path_template": "company/products/{product_id}.md",
+      "alias_fields": ["category"],
+      "facts": [
+        {"field": "product_name", "predicate": "product_name"},
+        {"field": "category", "predicate": "category"},
+        {"field": "discounted_price", "predicate": "discounted_price"},
+        {"field": "actual_price", "predicate": "actual_price"},
+        {"field": "rating", "predicate": "rating"},
+        {"field": "about_product", "predicate": "about_product"}
+      ]
+    },
+    {
+      "path": "Customer_Relation_Management/sales.json",
+      "format": "json",
+      "id_field": "sales_record_id",
+      "entity_type": "sale",
+      "path_template": "company/sales/{sales_record_id}.md",
+      "facts": [
+        {"field": "customer_id", "predicate": "customer", "entity_ref": {"prefix": "customer"}},
+        {"field": "product_id", "predicate": "product", "entity_ref": {"prefix": "product"}},
+        {"field": "Date_of_Purchase", "predicate": "date_of_purchase"},
+        {"field": "discounted_price", "predicate": "discounted_price"},
+        {"field": "actual_price", "predicate": "actual_price"}
+      ]
+    },
+    {
+      "path": "Customer_Relation_Management/Product Sentiment/product_sentiment.json",
+      "format": "json",
+      "id_field": "sentiment_id",
+      "entity_type": "sentiment",
+      "path_template": "company/sentiment/{sentiment_id}.md",
+      "facts": [
+        {"field": "customer_id", "predicate": "customer", "entity_ref": {"prefix": "customer"}},
+        {"field": "product_id", "predicate": "product", "entity_ref": {"prefix": "product"}},
+        {"field": "review_date", "predicate": "review_date"},
+        {"field": "review_content", "predicate": "review_content"}
+      ]
+    },
+    {
+      "path": "IT_Service_Management/it_tickets.json",
+      "format": "json",
+      "id_field": "id",
+      "entity_type": "ticket",
+      "summary_field": "Issue",
+      "path_template": "company/tickets/{id}.md",
+      "alias_fields": ["priority"],
+      "facts": [
+        {"field": "priority", "predicate": "priority"},
+        {"field": "assigned_date", "predicate": "assigned_date"},
+        {"field": "Issue", "predicate": "issue"},
+        {"field": "Resolution", "predicate": "resolution"},
+        {"field": "raised_by_emp_id", "predicate": "raised_by", "entity_ref": {"prefix": "employee"}},
+        {"field": "emp_id", "predicate": "assigned_to", "entity_ref": {"prefix": "employee"}}
+      ]
+    },
+    {
+      "path": "Business_and_Management/clients.json",
+      "format": "json",
+      "id_field": "client_id",
+      "entity_type": "client",
+      "name_field": "business_name",
+      "summary_field": "engagement_description",
+      "path_template": "company/clients/{client_id}.md",
+      "alias_fields": ["contact_email"],
+      "facts": [
+        {"field": "industry", "predicate": "industry"},
+        {"field": "business_type", "predicate": "business_type"},
+        {"field": "contact_person_name", "predicate": "contact_person_name"},
+        {"field": "contact_email", "predicate": "contact_email"},
+        {"field": "monthly_revenue", "predicate": "monthly_revenue"},
+        {"field": "onboarding_date", "predicate": "onboarding_date"},
+        {"field": "current_poc_product", "predicate": "current_poc_product"},
+        {"field": "poc_status", "predicate": "poc_status"},
+        {"field": "engagement_description", "predicate": "engagement_description"},
+        {"field": "business_representative_employee", "predicate": "business_representative", "entity_ref": {"prefix": "employee"}}
+      ]
+    },
+    {
+      "path": "Business_and_Management/vendors.json",
+      "format": "json",
+      "id_field": "client_id",
+      "entity_type": "vendor",
+      "name_field": "business_name",
+      "summary_field": "relationship_description",
+      "path_template": "company/vendors/{client_id}.md",
+      "facts": [
+        {"field": "industry", "predicate": "industry"},
+        {"field": "business_type", "predicate": "business_type"},
+        {"field": "registered_address", "predicate": "registered_address"},
+        {"field": "tax_id", "predicate": "tax_id"},
+        {"field": "onboarding_date", "predicate": "onboarding_date"},
+        {"field": "relationship_description", "predicate": "relationship_description"},
+        {"field": "management_representative_employee", "predicate": "management_representative", "entity_ref": {"prefix": "employee"}}
+      ]
+    }
+  ]
+}

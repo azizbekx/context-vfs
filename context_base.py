@@ -201,6 +201,7 @@ def build_parser() -> argparse.ArgumentParser:
     build_parser.add_argument("--force", action="store_true")
     build_parser.add_argument(
         "--schema",
+        default="dataset_schema.json",
         help="Optional JSON schema for ingesting additional source files generically.",
     )
     build_parser.add_argument(
