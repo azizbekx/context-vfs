@@ -109,33 +109,51 @@ class ContextBuilder:
         logger.info("Generating embeddings for %d entities...", len(rows))
         try:
             from google import genai
-            client = genai.Client()
+            import os
+            api_key = os.environ.get("GEMINI_API_KEY")
+            if not api_key:
+                logger.warning("GEMINI_API_KEY not set. Skipping embeddings.")
+                return
+            client = genai.Client(api_key=api_key)
         except ImportError:
             logger.warning("google-genai not installed or no API key. Skipping embeddings.")
             return
 
+        import time
         batch_size = 100
         for i in range(0, len(rows), batch_size):
             batch = rows[i:i+batch_size]
             texts = [f"{r['name']} {r['summary'] or ''}".strip() for r in batch]
-            try:
-                res = client.models.embed_content(
-                    model="gemini-embedding-2", 
-                    contents=texts
-                )
-                for row, emb in zip(batch, res.embeddings):
-                    text_content = f"{row['name']} {row['summary'] or ''}".strip()
-                    self.store.conn.execute("""
-                        INSERT INTO entity_embeddings (entity_id, text_content, embedding_json)
-                        VALUES (?, ?, ?)
-                        ON CONFLICT(entity_id) DO UPDATE SET
-                            text_content = excluded.text_content,
-                            embedding_json = excluded.embedding_json
-                    """, (row["id"], text_content, json.dumps(emb.values)))
-                self.store.conn.commit()
-                logger.info("Embedded %d / %d", min(i + len(batch), len(rows)), len(rows))
-            except Exception as e:
-                logger.error("Embedding batch failed: %s", e)
+            
+            retries = 3
+            while retries > 0:
+                try:
+                    res = client.models.embed_content(
+                        model="gemini-embedding-2", 
+                        contents=texts
+                    )
+                    for row, emb in zip(batch, res.embeddings):
+                        text_content = f"{row['name']} {row['summary'] or ''}".strip()
+                        self.store.conn.execute("""
+                            INSERT INTO entity_embeddings (entity_id, text_content, embedding_json)
+                            VALUES (?, ?, ?)
+                            ON CONFLICT(entity_id) DO UPDATE SET
+                                text_content = excluded.text_content,
+                                embedding_json = excluded.embedding_json
+                        """, (row["id"], text_content, json.dumps(emb.values)))
+                    self.store.conn.commit()
+                    logger.info("Embedded %d / %d", min(i + len(batch), len(rows)), len(rows))
+                    # Removed sleep to maximize throughput
+                    break
+                except Exception as e:
+                    err_str = str(e).lower()
+                    if "429" in err_str or "quota" in err_str or "exhausted" in err_str:
+                        logger.warning("Quota reached. Sleeping for 20 seconds before retrying...")
+                        time.sleep(20)
+                        retries -= 1
+                    else:
+                        logger.error("Embedding batch failed: %s", e)
+                        break
 
     def json_records(self, relative: str) -> list[dict[str, Any]]:
         path = self.dataset_dir / relative
@@ -733,6 +751,37 @@ class ContextBuilder:
         ]
         if len(non_empty) == 1:
             return non_empty[0]["id"]
+
+        # LLM Synonym Detection
+        if self.use_llm:
+            unique_values = list({f["value"].strip() for f in non_empty})
+            if len(unique_values) == 2:
+                try:
+                    from google import genai
+                    from .llm import GENERATION_MODEL
+                    import os
+                    api_key = os.environ.get("GEMINI_API_KEY")
+                    if not api_key:
+                        raise ValueError("GEMINI_API_KEY not set")
+                    client = genai.Client(api_key=api_key)
+                    prompt = (
+                        "You are an automated data conflict resolution system.\n"
+                        f"Fact predicate: {facts[0].get('predicate')}\n"
+                        f"Value A: {unique_values[0]}\n"
+                        f"Value B: {unique_values[1]}\n\n"
+                        "Are these two values functionally identical (e.g., synonyms, acronyms, or slight formatting differences of the same entity/concept)?\n"
+                        "Respond ONLY with 'YES' or 'NO'."
+                    )
+                    response = client.models.generate_content(
+                        model=GENERATION_MODEL, 
+                        contents=prompt,
+                        config={"temperature": 0.1}
+                    )
+                    if response.text and "YES" in response.text.upper():
+                        return max(non_empty, key=lambda f: f["confidence"])["id"]
+                except Exception as e:
+                    logger.warning("LLM auto-resolve failed: %s", e)
+
         return None
 
     def _source_of_truth_winner(self, facts: list[dict[str, Any]]) -> str | None:

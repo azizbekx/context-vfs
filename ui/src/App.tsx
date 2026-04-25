@@ -1,10 +1,10 @@
 import React, { useState, useEffect } from 'react';
 import { 
   Folder, FileText, ChevronRight, ChevronDown, 
-  Search, Hexagon, Layers, Settings, Activity
+  Search, Hexagon, Layers, Settings, Activity, AlertTriangle, Check
 } from 'lucide-react';
-import { motion } from 'framer-motion';
-import { fetchTree, fetchEntity, fetchNeighbors, fetchFile } from './api';
+import { motion, AnimatePresence } from 'framer-motion';
+import { fetchTree, fetchEntity, fetchNeighbors, fetchFile, search, fetchReviews, resolveReview } from './api';
 
 // Utilities for VFS parsing
 function buildTree(paths: string[]) {
@@ -48,17 +48,69 @@ export default function App() {
   const [selectedNode, setSelectedNode] = useState<any | null>(null);
   const [entityData, setEntityData] = useState<any | null>(null);
   const [neighborsData, setNeighborsData] = useState<any[]>([]);
-  const [searchQuery, setSearchQuery] = useState('');
-  const [loading, setLoading] = useState(false);
   const [fileContent, setFileContent] = useState<string | null>(null);
+  
+  const [searchQuery, setSearchQuery] = useState('');
+  const [searchResults, setSearchResults] = useState<any[]>([]);
+  const [isSearching, setIsSearching] = useState(false);
+  const [hasSearched, setHasSearched] = useState(false);
+  
+  const [reviews, setReviews] = useState<any[]>([]);
+  const [loading, setLoading] = useState(false);
 
   useEffect(() => {
-    fetchTree().then(data => {
-      if (data && data.files) {
-        setTreeData(buildTree(data.files));
-      }
-    }).catch(console.error);
+    refreshData();
   }, []);
+
+  const refreshData = () => {
+    fetchTree().then(data => {
+      if (data && data.files) setTreeData(buildTree(data.files));
+    }).catch(console.error);
+    fetchReviews().then(data => {
+      if (data && data.reviews) setReviews(data.reviews);
+    }).catch(console.error);
+  };
+
+  const handleSearch = () => {
+    if (!searchQuery.trim()) {
+      setSearchResults([]);
+      setHasSearched(false);
+      return;
+    }
+    setIsSearching(true);
+    setHasSearched(true);
+    search(searchQuery).then(data => {
+      setSearchResults(data.results || []);
+    }).catch(e => {
+      console.error("Search failed", e);
+      setSearchResults([]);
+    }).finally(() => {
+      setIsSearching(false);
+    });
+  };
+
+  const clearSearch = () => {
+    setSearchQuery('');
+    setSearchResults([]);
+    setHasSearched(false);
+  };
+
+  const loadEntity = async (entityId: string) => {
+    setLoading(true);
+    setFileContent(null);
+    try {
+      const eData = await fetchEntity(entityId);
+      setEntityData(eData);
+      const nData = await fetchNeighbors(entityId);
+      setNeighborsData(nData.neighbors || []);
+    } catch (e) {
+      console.error("Failed to load entity", e);
+      setEntityData(null);
+      setNeighborsData([]);
+    } finally {
+      setLoading(false);
+    }
+  };
 
   const handleSelectNode = async (node: any) => {
     setSelectedNode(node);
@@ -95,34 +147,40 @@ export default function App() {
         }
       }
 
-      setLoading(true);
-      try {
-        if (entityId) {
-          const eData = await fetchEntity(entityId);
-          setEntityData(eData);
-          const nData = await fetchNeighbors(entityId);
-          setNeighborsData(nData.neighbors || []);
-        } else if (node.originalPath) {
-          // If it's not an entity (like review.md or index.md), fetch the raw file
+      if (entityId) {
+        loadEntity(entityId);
+      } else if (node.originalPath) {
+        setLoading(true);
+        try {
           const fData = await fetchFile(node.originalPath);
           setFileContent(fData.content);
+        } catch (e) {
+          console.error("Failed to load file", e);
+        } finally {
+          setLoading(false);
         }
-      } catch (e) {
-        console.error("Failed to load", e);
-      } finally {
-        setLoading(false);
       }
     }
   };
 
+  const handleResolve = async (reviewId: string, choice: string) => {
+    await resolveReview(reviewId, choice);
+    refreshData();
+    if (entityData) {
+      loadEntity(entityData.entity.id);
+    }
+  };
+
+  const activeReviews = entityData ? reviews.filter(r => r.entity_id === entityData.entity.id && r.status === 'open') : [];
+
   return (
     <div className="app-container">
-      {/* Left Sidebar - VFS */}
+      {/* Left Sidebar - VFS & Search */}
       <motion.div 
         initial={{ opacity: 0, x: -20 }}
         animate={{ opacity: 1, x: 0 }}
         className="sidebar-left glass-panel"
-        style={{ padding: '20px' }}
+        style={{ padding: '20px', display: 'flex', flexDirection: 'column' }}
       >
         <div className="app-header">
           <div className="logo-area">
@@ -131,38 +189,80 @@ export default function App() {
           </div>
         </div>
 
-        <div style={{ position: 'relative', marginBottom: '24px' }}>
-          <Search size={16} style={{ position: 'absolute', left: '12px', top: '10px', color: 'var(--text-tertiary)' }} />
-          <input 
-            type="text" 
-            placeholder="Search company memory..."
-            value={searchQuery}
-            onChange={e => setSearchQuery(e.target.value)}
+        <div style={{ position: 'relative', marginBottom: '24px', display: 'flex', gap: '8px' }}>
+          <div style={{ position: 'relative', flex: 1 }}>
+            <Search size={16} style={{ position: 'absolute', left: '12px', top: '10px', color: 'var(--text-tertiary)' }} />
+            <input 
+              type="text" 
+              placeholder="Semantic Search..."
+              value={searchQuery}
+              onChange={e => setSearchQuery(e.target.value)}
+              onKeyDown={e => { if (e.key === 'Enter') handleSearch(); }}
+              style={{
+                width: '100%',
+                padding: '8px 12px 8px 36px',
+                background: 'rgba(0,0,0,0.2)',
+                border: '1px solid var(--border-subtle)',
+                borderRadius: '8px',
+                color: 'var(--text-primary)',
+                outline: 'none',
+                fontSize: '0.875rem'
+              }}
+            />
+            {hasSearched && (
+              <button 
+                onClick={clearSearch}
+                style={{ position: 'absolute', right: '8px', top: '8px', background: 'none', border: 'none', color: 'var(--text-tertiary)', cursor: 'pointer', fontSize: '1rem' }}
+              >
+                ×
+              </button>
+            )}
+          </div>
+          <button 
+            onClick={handleSearch}
             style={{
-              width: '100%',
-              padding: '8px 12px 8px 36px',
-              background: 'rgba(0,0,0,0.2)',
-              border: '1px solid var(--border-subtle)',
+              background: 'var(--accent-cyan)',
+              color: '#000',
+              border: 'none',
               borderRadius: '8px',
-              color: 'var(--text-primary)',
-              outline: 'none',
+              padding: '0 16px',
+              fontWeight: 'bold',
+              cursor: 'pointer',
               fontSize: '0.875rem'
             }}
-          />
+          >
+            Search
+          </button>
         </div>
 
-        <div className="heading-sm">Virtual File System</div>
-        
-        <div className="tree-container" style={{ flex: 1, overflowY: 'auto' }}>
-          {treeData.map(node => (
-            <TreeNode key={node.id} node={node} level={0} onSelect={handleSelectNode} selectedId={selectedNode?.id} />
-          ))}
-          {treeData.length === 0 && <div style={{ color: 'var(--text-secondary)', fontSize: '0.875rem' }}>Loading VFS...</div>}
-        </div>
-
-        <div style={{ marginTop: 'auto', paddingTop: '20px', borderTop: '1px solid var(--border-subtle)' }}>
-          <div className="tree-item"><Settings size={16} /> Settings</div>
-        </div>
+        {hasSearched ? (
+          <div style={{ flex: 1, overflowY: 'auto' }}>
+            <div className="heading-sm">Search Results</div>
+            {isSearching && <div style={{ color: 'var(--text-secondary)', fontSize: '0.8rem' }}>Searching...</div>}
+            {searchResults.map((res, i) => (
+              <div 
+                key={i} 
+                onClick={() => res.entity_id ? loadEntity(res.entity_id) : null}
+                style={{ 
+                  padding: '10px', background: 'rgba(0,0,0,0.2)', marginBottom: '8px', 
+                  borderRadius: '6px', cursor: 'pointer', border: '1px solid var(--border-subtle)'
+                }}
+              >
+                <div style={{ color: 'var(--accent-cyan)', fontSize: '0.8rem', fontWeight: 'bold' }}>{res.name || res.path}</div>
+                <div style={{ color: 'var(--text-secondary)', fontSize: '0.75rem', marginTop: '4px' }}>{res.snippet}</div>
+              </div>
+            ))}
+          </div>
+        ) : (
+          <>
+            <div className="heading-sm">Virtual File System</div>
+            <div className="tree-container" style={{ flex: 1, overflowY: 'auto' }}>
+              {treeData.map(node => (
+                <TreeNode key={node.id} node={node} level={0} onSelect={handleSelectNode} selectedId={selectedNode?.id} />
+              ))}
+            </div>
+          </>
+        )}
       </motion.div>
 
       {/* Main Content - Graph */}
@@ -174,12 +274,6 @@ export default function App() {
       >
         <div style={{ padding: '20px', borderBottom: '1px solid var(--border-subtle)', display: 'flex', justifyContent: 'space-between', alignItems: 'center', zIndex: 10 }}>
           <h2 style={{ margin: 0, fontSize: '1.25rem', color: 'var(--text-primary)' }}>Context Graph</h2>
-          <div style={{ display: 'flex', gap: '8px' }}>
-            <button style={{ background: 'var(--bg-surface)', border: '1px solid var(--border-subtle)', padding: '6px 12px', borderRadius: '6px', color: 'var(--text-primary)', cursor: 'pointer' }}>
-              <Layers size={14} style={{ display: 'inline', marginRight: '6px', verticalAlign: 'middle' }} />
-              Filter By Type
-            </button>
-          </div>
         </div>
         
         <div className="graph-canvas" style={{ position: 'relative', overflow: 'hidden', flex: 1, display: 'flex', flexDirection: 'column' }}>
@@ -188,12 +282,12 @@ export default function App() {
               {fileContent}
             </div>
           ) : (
-            <InteractiveGraph entityData={entityData} neighbors={neighborsData} loading={loading} />
+            <InteractiveGraph entityData={entityData} neighbors={neighborsData} loading={loading} onNodeClick={loadEntity} />
           )}
         </div>
       </motion.div>
 
-      {/* Right Sidebar - Properties */}
+      {/* Right Sidebar - Properties & Reviews */}
       <motion.div 
         initial={{ opacity: 0, x: 20 }}
         animate={{ opacity: 1, x: 0 }}
@@ -203,17 +297,10 @@ export default function App() {
       >
         <div className="heading-sm">Inspector</div>
         
-        {!entityData && !fileContent && !loading ? (
+        {!entityData && !fileContent && !loading && (
           <div style={{ textAlign: 'center', color: 'var(--text-secondary)', marginTop: '40px', fontSize: '0.875rem' }}>
             <Activity size={32} style={{ opacity: 0.5, margin: '0 auto 16px' }} />
-            <div>Select a file to inspect its entity and provenance.</div>
-          </div>
-        ) : null}
-
-        {fileContent && !entityData && (
-          <div style={{ textAlign: 'center', color: 'var(--text-secondary)', marginTop: '40px', fontSize: '0.875rem' }}>
-            <FileText size={32} style={{ opacity: 0.5, margin: '0 auto 16px' }} />
-            <div>Viewing plain markdown file.</div>
+            <div>Select a file or search for an entity to inspect.</div>
           </div>
         )}
 
@@ -226,6 +313,39 @@ export default function App() {
               <h3 style={{ margin: '0 0 4px 0', color: 'var(--text-primary)' }}>{entityData.entity.name}</h3>
               <div style={{ fontSize: '0.875rem', color: 'var(--text-secondary)' }}>{entityData.entity.type.toUpperCase()}</div>
             </div>
+
+            {activeReviews.length > 0 && (
+              <div className="prop-group" style={{ background: 'rgba(255, 152, 0, 0.1)', padding: '12px', borderRadius: '8px', border: '1px solid rgba(255, 152, 0, 0.3)' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '8px', color: '#ff9800', marginBottom: '12px', fontWeight: 'bold' }}>
+                  <AlertTriangle size={18} />
+                  Conflicts Detected
+                </div>
+                {activeReviews.map(r => {
+                  const candidates = JSON.parse(r.candidates_json);
+                  return (
+                    <div key={r.id} style={{ marginBottom: '16px' }}>
+                      <div style={{ fontSize: '0.8rem', color: 'var(--text-primary)', marginBottom: '8px' }}>
+                        Predicate: <b>{r.predicate}</b>
+                      </div>
+                      {candidates.map((c: any) => (
+                        <div key={c.choice} style={{ background: 'rgba(0,0,0,0.3)', padding: '8px', borderRadius: '6px', marginBottom: '4px', fontSize: '0.75rem', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                          <div>
+                            <div style={{ color: 'var(--text-primary)' }}>{c.value}</div>
+                            <div style={{ color: 'var(--text-tertiary)', fontSize: '0.65rem' }}>Conf: {Math.round(c.confidence*100)}%</div>
+                          </div>
+                          <button 
+                            onClick={() => handleResolve(r.id, c.choice)}
+                            style={{ background: 'var(--accent-cyan)', color: '#000', border: 'none', padding: '4px 8px', borderRadius: '4px', cursor: 'pointer', fontWeight: 'bold', fontSize: '0.7rem' }}
+                          >
+                            Resolve
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  );
+                })}
+              </div>
+            )}
 
             <div className="prop-group">
               <div className="heading-sm">Properties</div>
@@ -260,7 +380,7 @@ export default function App() {
 }
 
 // Custom Interactive Graph
-function InteractiveGraph({ entityData, neighbors, loading }: { entityData: any, neighbors: any[], loading: boolean }) {
+function InteractiveGraph({ entityData, neighbors, loading, onNodeClick }: { entityData: any, neighbors: any[], loading: boolean, onNodeClick: (id: string) => void }) {
   if (loading) {
     return (
       <div style={{ position: 'absolute', top: '50%', left: '50%', transform: 'translate(-50%, -50%)' }}>
@@ -273,9 +393,7 @@ function InteractiveGraph({ entityData, neighbors, loading }: { entityData: any,
     );
   }
 
-  if (!entityData) {
-    return null;
-  }
+  if (!entityData) return null;
 
   return (
     <div style={{ width: '100%', height: '100%', position: 'relative' }}>
@@ -288,19 +406,32 @@ function InteractiveGraph({ entityData, neighbors, loading }: { entityData: any,
         </defs>
         {neighbors.map((n, i) => {
           const angle = (i / neighbors.length) * Math.PI * 2;
-          const radius = 180;
+          const radius = 220;
           const x2 = 400 + Math.cos(angle) * radius;
           const y2 = 300 + Math.sin(angle) * radius;
           return (
-            <motion.line
-              key={n.id || i}
-              initial={{ opacity: 0, pathLength: 0 }}
-              animate={{ opacity: 1, pathLength: 1 }}
-              transition={{ duration: 1, delay: i * 0.1 }}
-              x1="400" y1="300" x2={x2} y2={y2}
-              stroke="url(#lineGrad)"
-              strokeWidth="2"
-            />
+            <g key={n.id || i}>
+              <motion.line
+                initial={{ opacity: 0, pathLength: 0 }}
+                animate={{ opacity: 1, pathLength: 1 }}
+                transition={{ duration: 1, delay: i * 0.1 }}
+                x1="400" y1="300" x2={x2} y2={y2}
+                stroke="url(#lineGrad)"
+                strokeWidth="2"
+              />
+              <motion.text
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+                transition={{ delay: 0.5 + i * 0.1 }}
+                x={400 + Math.cos(angle) * (radius / 2)}
+                y={300 + Math.sin(angle) * (radius / 2) - 10}
+                fill="var(--text-tertiary)"
+                fontSize="10"
+                textAnchor="middle"
+              >
+                {n.relation}
+              </motion.text>
+            </g>
           );
         })}
       </svg>
@@ -311,17 +442,19 @@ function InteractiveGraph({ entityData, neighbors, loading }: { entityData: any,
         animate={{ scale: 1 }}
         style={{
           position: 'absolute', left: '400px', top: '300px', transform: 'translate(-50%, -50%)',
-          background: 'rgba(0, 229, 255, 0.1)', border: '1px solid var(--accent-cyan)',
-          padding: '16px 24px', borderRadius: '12px', zIndex: 10, boxShadow: '0 0 30px rgba(0, 229, 255, 0.2)'
+          background: 'rgba(0, 229, 255, 0.1)', border: '2px solid var(--accent-cyan)',
+          padding: '16px 24px', borderRadius: '12px', zIndex: 10, boxShadow: '0 0 30px rgba(0, 229, 255, 0.2)',
+          textAlign: 'center'
         }}
       >
         <h3 style={{ margin: 0, color: 'var(--accent-cyan)' }}>{entityData.entity.name}</h3>
+        <span style={{ fontSize: '0.7rem', color: 'var(--text-secondary)' }}>{entityData.entity.type}</span>
       </motion.div>
 
       {/* Neighbor Nodes */}
       {neighbors.map((n, i) => {
         const angle = (i / neighbors.length) * Math.PI * 2;
-        const radius = 180;
+        const radius = 220;
         const x = 400 + Math.cos(angle) * radius;
         const y = 300 + Math.sin(angle) * radius;
         return (
@@ -330,16 +463,19 @@ function InteractiveGraph({ entityData, neighbors, loading }: { entityData: any,
             initial={{ opacity: 0, scale: 0 }}
             animate={{ opacity: 1, scale: 1 }}
             transition={{ delay: 0.5 + i * 0.1 }}
-            whileHover={{ scale: 1.1, zIndex: 20 }}
+            whileHover={{ scale: 1.1, zIndex: 20, border: '1px solid var(--accent-cyan)' }}
+            onClick={() => onNodeClick(n.entity_id)}
             style={{
               position: 'absolute', left: `${x}px`, top: `${y}px`, transform: 'translate(-50%, -50%)',
               background: 'var(--bg-surface)', border: '1px solid var(--border-subtle)',
-              padding: '8px 12px', borderRadius: '20px', fontSize: '0.75rem',
+              padding: '10px 14px', borderRadius: '8px', fontSize: '0.75rem',
               color: 'var(--text-primary)', cursor: 'pointer', zIndex: 5,
-              whiteSpace: 'nowrap', textOverflow: 'ellipsis', overflow: 'hidden', maxWidth: '150px'
+              whiteSpace: 'nowrap', textOverflow: 'ellipsis', overflow: 'hidden', maxWidth: '180px',
+              textAlign: 'center'
             }}
           >
-            {n.name}
+            <div>{n.name}</div>
+            <div style={{ fontSize: '0.65rem', color: 'var(--text-tertiary)', marginTop: '2px' }}>{n.type}</div>
           </motion.div>
         );
       })}
@@ -389,14 +525,8 @@ function TreeNode({ node, level, onSelect, selectedId }: { node: any, level: num
             <TreeNode key={child.id} node={child} level={level + 1} onSelect={onSelect} selectedId={selectedId} />
           ))}
           {node.children.length > DISPLAY_LIMIT && (
-            <div style={{ 
-              paddingLeft: `${(level + 1) * 16 + 12}px`, 
-              color: 'var(--text-tertiary)', 
-              fontSize: '0.75rem', 
-              paddingTop: '6px',
-              paddingBottom: '6px'
-            }}>
-              + {node.children.length - DISPLAY_LIMIT} more items
+            <div style={{ paddingLeft: `${(level + 1) * 16 + 12}px`, color: 'var(--text-tertiary)', fontSize: '0.75rem', paddingTop: '6px' }}>
+              + {node.children.length - DISPLAY_LIMIT} more
             </div>
           )}
         </div>

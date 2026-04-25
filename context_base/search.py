@@ -11,7 +11,11 @@ def semantic_search(store: Store, query: str, limit: int = 5) -> list[dict[str, 
     try:
         from google import genai
         import json
-        client = genai.Client()
+        import os
+        api_key = os.environ.get("GEMINI_API_KEY")
+        if not api_key:
+            return []
+        client = genai.Client(api_key=api_key)
     except ImportError:
         return []
         

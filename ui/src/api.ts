@@ -39,3 +39,9 @@ export async function resolveReview(reviewId: string, choice: string) {
   if (!res.ok) throw new Error('Failed to resolve review');
   return res.json();
 }
+
+export async function fetchReviews() {
+  const res = await fetch(`${API_BASE}/reviews`);
+  if (!res.ok) throw new Error('Failed to fetch reviews');
+  return res.json();
+}
