@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from 'react';
-import { Hexagon, Search, Folder, FileText, ChevronRight, ChevronDown, AlertTriangle, Plus, Trash2, Save, X, Edit3, Eye, Code, RefreshCw, Database, GitBranch, ClipboardList, ShieldCheck, Route, CheckCircle2 } from 'lucide-react';
+import { Hexagon, Search, Folder, FileText, ChevronRight, ChevronDown, AlertTriangle, Plus, Trash2, Save, X, Edit3, Eye, Code, RefreshCw, Database, GitBranch, ClipboardList, ShieldCheck, Route, CheckCircle2, LayoutDashboard, ShieldAlert } from 'lucide-react';
 import { fetchTree, fetchEntity, fetchNeighbors, fetchFile, search, fetchReviews, resolveReview, createEntity, addFact, editFact, deleteFact, deleteEntity, fetchStats, fetchFactSources } from './api';
 import Dashboard from './components/Dashboard';
 import MarkdownRenderer from './components/MarkdownRenderer';
@@ -123,9 +123,9 @@ export default function App() {
       <header className="topbar">
         <div className="topbar-brand"><Hexagon size={20} />Qontext</div>
         <nav className="topbar-nav">
-          <button className={view === 'dashboard' ? 'active' : ''} onClick={() => setView('dashboard')}>Dashboard</button>
-          <button className={view === 'browser' ? 'active' : ''} onClick={() => setView('browser')}>Context Browser</button>
-          <button className={view === 'reviews' ? 'active' : ''} onClick={() => setView('reviews')}>Reviews</button>
+          <button className={view === 'dashboard' ? 'active' : ''} onClick={() => setView('dashboard')}><LayoutDashboard size={14} />Dashboard</button>
+          <button className={view === 'browser' ? 'active' : ''} onClick={() => setView('browser')}><Folder size={14} />Context Browser</button>
+          <button className={view === 'reviews' ? 'active' : ''} onClick={() => setView('reviews')}><ShieldAlert size={14} />Reviews</button>
         </nav>
         <div className="topbar-stats">
           {stats && <>
@@ -316,7 +316,7 @@ export default function App() {
       </div>
 
       {err && (
-        <div style={{ position: 'fixed', bottom: 16, left: '50%', transform: 'translateX(-50%)', background: '#dc2626', color: '#fff', padding: '8px 16px', borderRadius: 8, fontSize: 13, display: 'flex', gap: 10, alignItems: 'center', zIndex: 100 }}>
+        <div style={{ position: 'fixed', bottom: 16, left: '50%', transform: 'translateX(-50%)', background: 'var(--danger)', color: '#fff', padding: '8px 16px', borderRadius: 8, fontSize: 13, display: 'flex', gap: 10, alignItems: 'center', zIndex: 100, boxShadow: '0 4px 20px rgba(0,0,0,.6)' }}>
           {err} <button onClick={() => setErr(null)} style={{ background: 'none', border: 'none', color: '#fff', cursor: 'pointer' }}><X size={14} /></button>
         </div>
       )}
