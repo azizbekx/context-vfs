@@ -490,39 +490,58 @@ function ReviewDetail({
       {/* Cards are the hero — section label removed so they sit immediately
           under the header. Per the latest brief: "die zwei kacheln oben". */}
 
-      <div className="rq-cards-grid">
-        {anchor && (
-          <SourceCard
-            candidate={anchor}
-            role="anchor"
-            predicate={review.predicate}
-            disabled={resolving}
-            onAccept={() => onResolve(review.id, anchor.choice_id)}
-            onOpenFactSource={onOpenFactSource}
-            effectiveFactId={
-              anchor.fact_id ?? resolveFactIdFromSource(anchor.source, entityFacts)
-            }
-            factSources={factSources}
-          />
-        )}
-        {variant && (
-          <SourceCard
-            candidate={variant}
-            role="variant"
-            predicate={review.predicate}
-            disabled={resolving}
-            onAccept={() => onResolve(review.id, variant.choice_id)}
-            onOpenFactSource={onOpenFactSource}
-            effectiveFactId={
-              variant.fact_id ?? resolveFactIdFromSource(variant.source, entityFacts)
-            }
-            factSources={factSources}
-          />
-        )}
-        {!anchor && !variant && (
-          <div className="rq-empty">No candidates attached to this review.</div>
-        )}
-      </div>
+      {(() => {
+        // Resolve effective fact_ids + factSources up here so we can compute
+        // a shared keyOrder across both raw_jsons → "Age" lines up on both
+        // cards at the same vertical row, "Email" lines up too, etc.
+        const anchorFactId = anchor
+          ? anchor.fact_id ?? resolveFactIdFromSource(anchor.source, entityFacts)
+          : null;
+        const variantFactId = variant
+          ? variant.fact_id ?? resolveFactIdFromSource(variant.source, entityFacts)
+          : null;
+        const anchorFactSource = anchorFactId ? factSources[anchorFactId] : undefined;
+        const variantFactSource = variantFactId ? factSources[variantFactId] : undefined;
+        const sharedKeyOrder = computeSharedKeyOrder(
+          parseRawJson(anchorFactSource?.raw_json),
+          parseRawJson(variantFactSource?.raw_json),
+          review.predicate
+        );
+
+        return (
+          <div className="rq-cards-grid">
+            {anchor && (
+              <SourceCard
+                candidate={anchor}
+                role="anchor"
+                predicate={review.predicate}
+                disabled={resolving}
+                onAccept={() => onResolve(review.id, anchor.choice_id)}
+                onOpenFactSource={onOpenFactSource}
+                effectiveFactId={anchorFactId}
+                factSources={factSources}
+                keyOrder={sharedKeyOrder}
+              />
+            )}
+            {variant && (
+              <SourceCard
+                candidate={variant}
+                role="variant"
+                predicate={review.predicate}
+                disabled={resolving}
+                onAccept={() => onResolve(review.id, variant.choice_id)}
+                onOpenFactSource={onOpenFactSource}
+                effectiveFactId={variantFactId}
+                factSources={factSources}
+                keyOrder={sharedKeyOrder}
+              />
+            )}
+            {!anchor && !variant && (
+              <div className="rq-empty">No candidates attached to this review.</div>
+            )}
+          </div>
+        );
+      })()}
 
       {others.length > 0 && (
         <>
@@ -590,6 +609,7 @@ function SourceCard({
   onOpenFactSource,
   effectiveFactId,
   factSources,
+  keyOrder,
 }: {
   candidate: Candidate;
   role: 'anchor' | 'variant';
@@ -602,6 +622,9 @@ function SourceCard({
    *  entity.facts matching the same dataset_path + record_id. */
   effectiveFactId: string | null;
   factSources: Record<string, any>;
+  /** Shared key order computed across both cards' raw_jsons so the same
+   *  field name appears at the same vertical row in both grids. */
+  keyOrder: string[];
 }) {
   const confidence = Math.round((candidate.confidence ?? 0) * 100);
   const value = candidate.value || candidate.object_entity_id || '—';
@@ -648,12 +671,14 @@ function SourceCard({
 
         {/* File preview — raw_json record fields lazy-loaded via fetchFactSources.
             Rendered for every card that has a source path (anchor with own
-            fact_id, variant fallback to a sibling fact on the same source row). */}
+            fact_id, variant fallback to a sibling fact on the same source row).
+            keyOrder is shared with the other card so rows line up. */}
         {effectiveFactId && (
           <SourcePreview
             factId={effectiveFactId}
             factSource={factSource}
             highlightField={predicate}
+            keyOrder={keyOrder}
           />
         )}
 
@@ -750,14 +775,80 @@ function parseRawJson(raw?: string | null): Record<string, unknown> | null {
   return null;
 }
 
+/**
+ * Build a single ordered key list shared by both source cards so the same
+ * data type ("Age", "Email", …) lines up at the same vertical row in
+ * both grids. Order: the contested predicate first, then keys present in
+ * BOTH records (preserving anchor order), then anchor-only, then variant-only.
+ * Capped to N entries so cards don't grow unbounded.
+ */
+function computeSharedKeyOrder(
+  anchor: Record<string, unknown> | null,
+  variant: Record<string, unknown> | null,
+  highlightField: string,
+  limit = 8
+): string[] {
+  const aKeys = anchor ? Object.keys(anchor) : [];
+  const bKeys = variant ? Object.keys(variant) : [];
+  const aSetLower = new Set(aKeys.map((k) => k.toLowerCase()));
+  const bSetLower = new Set(bKeys.map((k) => k.toLowerCase()));
+
+  const result: string[] = [];
+  const seenLower = new Set<string>();
+  const push = (k: string) => {
+    const kl = k.toLowerCase();
+    if (seenLower.has(kl)) return;
+    seenLower.add(kl);
+    result.push(k);
+  };
+
+  // 1. The contested predicate first (whichever side has it)
+  const hl = highlightField.toLowerCase();
+  const fromA = aKeys.find((k) => k.toLowerCase() === hl);
+  const fromB = bKeys.find((k) => k.toLowerCase() === hl);
+  if (fromA) push(fromA);
+  else if (fromB) push(fromB);
+
+  // 2. Keys present in both, preserving anchor order
+  for (const k of aKeys) {
+    if (bSetLower.has(k.toLowerCase())) push(k);
+  }
+  // 3. Anchor-only
+  for (const k of aKeys) push(k);
+  // 4. Variant-only
+  for (const k of bKeys) {
+    if (!aSetLower.has(k.toLowerCase())) push(k);
+  }
+
+  return result.slice(0, limit);
+}
+
+/** Case-insensitive lookup so "Age" / "age" / "AGE" all collapse. */
+function lookupCaseInsensitive(
+  obj: Record<string, unknown> | null,
+  key: string
+): unknown | undefined {
+  if (!obj) return undefined;
+  const kl = key.toLowerCase();
+  for (const k of Object.keys(obj)) {
+    if (k.toLowerCase() === kl) return obj[k];
+  }
+  return undefined;
+}
+
 function SourcePreview({
   factId,
   factSource,
   highlightField,
+  keyOrder,
 }: {
   factId: string;
   factSource?: any;
   highlightField: string;
+  /** Shared with the sibling card so rows line up. When the union is
+   *  smaller than 1, the preview still renders an empty placeholder grid
+   *  so the two cards stay the same height. */
+  keyOrder: string[];
 }) {
   if (!factSource) {
     return (
@@ -777,22 +868,16 @@ function SourcePreview({
   const datasetPath = factSource.dataset_path as string | undefined;
   const recordId = factSource.record_id as string | undefined;
 
-  // Build a focused preview: highlight field first, then the next ~5 most
-  // useful columns. Skip very long values (truncate) so the card stays scannable.
-  const entries: Array<[string, string]> = [];
-  if (raw) {
-    const keys = Object.keys(raw);
-    const ordered = [
-      ...keys.filter((k) => k.toLowerCase() === highlightField.toLowerCase()),
-      ...keys.filter((k) => k.toLowerCase() !== highlightField.toLowerCase()),
-    ].slice(0, 8);
-    for (const k of ordered) {
-      const v = raw[k];
-      const text = v == null ? '—' : typeof v === 'object' ? JSON.stringify(v) : String(v);
-      const trimmed = text.length > 220 ? text.slice(0, 220) + '…' : text;
-      entries.push([k, trimmed]);
-    }
-  }
+  // Use the shared keyOrder so the same fields appear at the same vertical
+  // row in both cards. Cells without a value in this card render as "—",
+  // keeping row count and alignment identical across the pair.
+  const entries: Array<[string, string]> = keyOrder.map((k) => {
+    const v = lookupCaseInsensitive(raw, k);
+    if (v == null) return [k, '—'];
+    const text = typeof v === 'object' ? JSON.stringify(v) : String(v);
+    const trimmed = text.length > 220 ? text.slice(0, 220) + '…' : text;
+    return [k, trimmed];
+  });
 
   return (
     <div className="rq-source-preview">
