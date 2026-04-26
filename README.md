@@ -113,14 +113,40 @@ The current prebuilt context base contains approximately:
 
 Counts may change after rebuilding from modified source data.
 
-Use the provided dataset instead of building a new one:
+Use the provided converted dataset instead of building a new one to save time:
 
 - Download it from
   [Google Drive](https://drive.google.com/file/d/15tltMCY-2B4k0lDLuBBn7PGhlpiAkMaA/view?usp=drive_link).
-- Extract or place the downloaded dataset folders directly in the repository
-  root.
-- Keep the expected source folders and files at the repository root so
+- This download is already in the converted format expected by this project.
+- Extract or place the downloaded dataset folders directly in the project root,
+  in the same folder as `README.md`, `context_base.py`, and
+  `dataset_schema.json`.
+- Keep the expected source folders and files at the project root so
   `dataset_schema.json` can map records into the context base.
+
+After extraction, `ls` from the project root should show project files and
+dataset folders together, for example:
+
+```text
+-rw-r--r--@  1 x  staff        5002 Apr 26 13:22 CLAUDE.md
+-rw-r--r--@  1 x  staff         182 Apr 25 14:40 Pipfile
+-rw-r--r--@  1 x  staff       48815 Apr 25 15:27 Pipfile.lock
+-rw-r--r--@  1 x  staff       18718 Apr 26 14:16 README.md
+-rw-r--r--@  1 x  staff        1545 Apr 26 10:10 SKILLS.md
+drwxr-xr-x@ 12 x  staff         384 Apr 26 13:52 context_base/
+-rw-r--r--@  1 x  staff       11691 Apr 26 13:10 context_base.py
+drwxr-xr-x@  5 x  staff         160 Apr 26 12:36 context_base_out/
+-rw-r--r--   1 x  staff  1305912244 Apr 26 14:06 context_base_out.zip
+drwxr-xr-x@ 13 x  staff         416 Apr 25 12:33 dataset/
+-rw-r--r--@  1 x  staff        5987 Apr 25 20:49 dataset_schema.json
+drwxr-xr-x@  4 x  staff         128 Apr 26 13:52 examples/
+-rw-r--r--@  1 x  staff       14335 Apr 26 13:10 hackathon_evaluation.md
+-rw-r--r--@  1 x  staff       10234 Apr 26 10:21 mcp_server.py
+-rw-r--r--@  1 x  staff         140 Apr 26 13:52 requirements.txt
+drwxr-xr-x@  3 x  staff          96 Apr 25 20:52 scripts/
+drwxr-xr-x@  4 x  staff         128 Apr 26 13:10 tests/
+drwxr-xr-x@ 17 x  staff         544 Apr 26 13:22 ui/
+```
 
 ## Core Capabilities
 
@@ -255,9 +281,29 @@ cd ..
 
 Download the Qontext simulated enterprise dataset from
 [Google Drive](https://drive.google.com/file/d/15tltMCY-2B4k0lDLuBBn7PGhlpiAkMaA/view?usp=drive_link)
-and extract or place its folders directly in the repository root. Use this
-dataset as the source input; do not create or synthesize a new dataset for the
-standard demo.
+and extract or place its folders directly in the project root, alongside
+`README.md`, `context_base.py`, and `dataset_schema.json`. This Drive download
+is already the converted format expected by the ingestion schema, so use it as
+the source input; do not create or synthesize a new dataset for the standard
+demo.
+
+Example project-root layout after extraction:
+
+```text
+README.md
+context_base.py
+dataset_schema.json
+Business_and_Management/
+Collaboration_tools/
+Customer_Relation_Management/
+Enterprise_Mail_System/
+Enterprise_Social_Platform/
+Human_Resource_Management/
+IT_Service_Management/
+Inazuma_overflow/
+Policy_Documents/
+Workspace/
+```
 
 ## Build The Context Base
 
