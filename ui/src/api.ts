@@ -22,6 +22,11 @@ export const resolveReview = (reviewId: string, choice: string) =>
     body: JSON.stringify({ choice }),
   });
 
+export const autoResolveReview = (reviewId: string) =>
+  request(`${API_BASE}/reviews/${encodeURIComponent(reviewId)}/auto-resolve`, {
+    method: 'POST',
+  });
+
 export const createEntity = (payload: {
   entity_id: string;
   entity_type: string;

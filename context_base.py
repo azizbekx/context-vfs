@@ -176,6 +176,52 @@ def cmd_tree(args: argparse.Namespace) -> None:
         print(path)
 
 
+def cmd_detect_conflicts(args: argparse.Namespace) -> None:
+    """Re-run conflict detection on existing DB without rebuilding."""
+    out_dir = Path(args.out_dir)
+    if not (out_dir / "context.db").exists():
+        raise SystemExit(f"No database found at {out_dir / 'context.db'}. Run 'build' first.")
+
+    store = open_store(out_dir)
+    try:
+        # Clear previous open review items so we get fresh detections
+        cleared = store.conn.execute(
+            "DELETE FROM review_items WHERE status = 'open'"
+        ).rowcount
+        if cleared:
+            print(f"Cleared {cleared} previously open review items.")
+
+        dataset_dir = Path(args.dataset_dir)
+        builder = ContextBuilder(
+            store,
+            dataset_dir,
+            now_iso(),
+            force=False,
+            use_llm=getattr(args, "use_llm", False),
+        )
+        builder.detect_conflicts()
+        store.commit()
+
+        new_reviews = store.row(
+            "SELECT COUNT(*) AS c FROM review_items WHERE status = 'open'"
+        )["c"]
+        auto_resolved = store.row(
+            "SELECT COUNT(*) AS c FROM facts WHERE status = 'confirmed'"
+        )["c"]
+
+        print(json.dumps({
+            "ok": True,
+            "open_reviews": new_reviews,
+            "confirmed_facts": auto_resolved,
+        }, indent=2))
+
+        if getattr(args, "regenerate_vfs", False):
+            generated = VFSGenerator(store, out_dir).generate()
+            print(f"Regenerated {generated} VFS files.")
+    finally:
+        store.close()
+
+
 def cmd_serve(args: argparse.Namespace) -> None:
     try:
         import uvicorn
@@ -247,6 +293,24 @@ def build_parser() -> argparse.ArgumentParser:
     tree_parser = subparsers.add_parser("tree", help="List generated VFS markdown files")
     tree_parser.add_argument("--out-dir", default=str(DEFAULT_OUT_DIR))
     tree_parser.set_defaults(func=cmd_tree)
+
+    dc_parser = subparsers.add_parser(
+        "detect-conflicts",
+        help="Re-run conflict detection on existing DB (no rebuild, no re-indexing).",
+    )
+    dc_parser.add_argument("--out-dir", default=str(DEFAULT_OUT_DIR))
+    dc_parser.add_argument("--dataset-dir", default=str(DEFAULT_DATASET_DIR))
+    dc_parser.add_argument(
+        "--use-llm",
+        action="store_true",
+        help="Enable LLM-assisted conflict categorization and smart suggestions.",
+    )
+    dc_parser.add_argument(
+        "--regenerate-vfs",
+        action="store_true",
+        help="Regenerate VFS files after resolving conflicts.",
+    )
+    dc_parser.set_defaults(func=cmd_detect_conflicts)
 
     serve_parser = subparsers.add_parser("serve", help="Run the local HTTP API")
     serve_parser.add_argument("--out-dir", default=str(DEFAULT_OUT_DIR))

@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 from typing import Any, Optional
 
@@ -5,6 +6,97 @@ from .search import neighbors, search
 from .storage import Store
 from .utils import now_iso
 from .vfs import VFSGenerator, tree
+
+
+def auto_resolve_review_with_llm(db: Store, review_id: str, resolver=None) -> dict[str, Any]:
+    review = db.row("SELECT * FROM review_items WHERE id = ? AND status = 'open'", (review_id,))
+    if not review:
+        return {"ok": False, "status": "not_found", "message": "Review not found or already resolved."}
+
+    candidates = json.loads(review["candidates_json"] or "[]")
+    if len(candidates) != 2:
+        return {
+            "ok": False,
+            "status": "needs_human_review",
+            "message": "LLM auto-resolve is only enabled for two-candidate reviews.",
+        }
+
+    facts = []
+    for candidate in candidates:
+        fact_id = candidate.get("fact_id")
+        if not fact_id:
+            return {
+                "ok": False,
+                "status": "needs_human_review",
+                "message": "This review has a candidate without a fact_id.",
+            }
+        fact = db.row(
+            """
+            SELECT f.*, s.dataset_path, s.record_id, s.raw_json, s.observed_at
+            FROM facts f
+            JOIN source_records s ON s.id = f.source_id
+            WHERE f.id = ?
+            """,
+            (fact_id,),
+        )
+        if not fact:
+            return {"ok": False, "status": "not_found", "message": f"Fact {fact_id} not found."}
+        facts.append(dict(fact))
+
+    entity = db.row("SELECT type FROM entities WHERE id = ?", (review["entity_id"],))
+    entity_type = entity["type"] if entity else "unknown"
+
+    if resolver is None:
+        from .llm import resolve_conflict as resolver
+
+    def fact_date(fact: dict[str, Any]) -> str:
+        raw = {}
+        try:
+            raw = json.loads(fact.get("raw_json") or "{}")
+        except (json.JSONDecodeError, TypeError):
+            pass
+        for key in ("date", "Date", "assigned_date", "review_date", "created_date", "interaction_date"):
+            value = raw.get(key)
+            if value:
+                return str(value)
+        return fact.get("observed_at") or ""
+
+    result = resolver(
+        entity_id=review["entity_id"],
+        entity_type=entity_type,
+        predicate=review["predicate"],
+        value_a=facts[0].get("value", ""),
+        source_a=f"{facts[0]['dataset_path']}#{facts[0]['record_id']}",
+        confidence_a=facts[0].get("confidence", 0.0),
+        date_a=fact_date(facts[0]),
+        value_b=facts[1].get("value", ""),
+        source_b=f"{facts[1]['dataset_path']}#{facts[1]['record_id']}",
+        confidence_b=facts[1].get("confidence", 0.0),
+        date_b=fact_date(facts[1]),
+    )
+
+    if (
+        result.get("resolution") != "auto_resolve"
+        or result.get("winner") not in {"A", "B"}
+        or float(result.get("confidence", 0.0)) < 0.75
+    ):
+        return {
+            "ok": False,
+            "status": "needs_human_review",
+            "llm_result": result,
+            "message": result.get("human_summary") or result.get("reason") or "LLM requested human review.",
+        }
+
+    winner_index = 0 if result["winner"] == "A" else 1
+    choice_id = candidates[winner_index]["choice_id"]
+    if not db.resolve_review(review_id, choice_id):
+        return {"ok": False, "status": "not_found", "message": "Review or choice not found."}
+    return {
+        "ok": True,
+        "status": "resolved",
+        "choice": choice_id,
+        "llm_result": result,
+    }
 
 
 def create_app(db_path: Path, out_dir: Path):
@@ -182,6 +274,20 @@ def create_app(db_path: Path, out_dir: Path):
                 raise HTTPException(status_code=404, detail="Review or choice not found")
             files_generated = refresh_review(db, review_id)
             return {"ok": True, "files_generated": files_generated}
+        finally:
+            db.close()
+
+    @app.post("/reviews/{review_id:path}/auto-resolve")
+    def auto_resolve(review_id: str):
+        db = store()
+        try:
+            result = auto_resolve_review_with_llm(db, review_id)
+            if result["status"] == "not_found":
+                raise HTTPException(status_code=404, detail=result["message"])
+            if not result["ok"]:
+                return result
+            files_generated = refresh_review(db, review_id)
+            return {**result, "files_generated": files_generated}
         finally:
             db.close()
 

@@ -451,6 +451,153 @@ class ContextBaseTests(unittest.TestCase):
         self.assertEqual({item["fact_id"] for item in candidates}, {confirmed_fact, generated_fact})
         store.close()
 
+    def test_conflict_detection_excludes_low_confidence_generated_candidates(self) -> None:
+        store = Store(self.out / "context.db")
+        store.init_schema()
+        store.reset()
+        source_a = store.upsert_source(
+            dataset_path="a.json",
+            record_id="1",
+            kind="test",
+            payload={"budget": "100"},
+            raw_ref="a.json#1",
+            run_id="run",
+            force=True,
+        )
+        source_b = store.upsert_source(
+            dataset_path="b.json",
+            record_id="2",
+            kind="test",
+            payload={"budget": "200"},
+            raw_ref="b.json#2",
+            run_id="run",
+            force=True,
+        )
+        source_c = store.upsert_source(
+            dataset_path="c.json",
+            record_id="3",
+            kind="test",
+            payload={"budget": "300"},
+            raw_ref="c.json#3",
+            run_id="run",
+            force=True,
+        )
+        store.upsert_entity(
+            entity_id="project:conflict",
+            entity_type="project",
+            name="Conflict Project",
+            path="company/projects/conflict.md",
+        )
+        included_a = store.upsert_fact(
+            subject_id="project:conflict",
+            predicate="budget",
+            source_id=source_a.id,
+            run_id="run",
+            value="100",
+            confidence=0.9,
+        )
+        included_b = store.upsert_fact(
+            subject_id="project:conflict",
+            predicate="budget",
+            source_id=source_b.id,
+            run_id="run",
+            value="200",
+            confidence=0.9,
+        )
+        excluded = store.upsert_fact(
+            subject_id="project:conflict",
+            predicate="budget",
+            source_id=source_c.id,
+            run_id="run",
+            value="300",
+            confidence=0.2,
+        )
+        builder = ContextBuilder(store, self.dataset, "run", force=False)
+        builder.detect_conflicts()
+        review = store.row("SELECT * FROM review_items")
+        self.assertIsNotNone(review)
+        candidates = json.loads(review["candidates_json"])
+        self.assertEqual({item["fact_id"] for item in candidates}, {included_a, included_b})
+        self.assertNotIn(excluded, {item["fact_id"] for item in candidates})
+        store.close()
+
+    def test_llm_auto_resolution_is_not_used_for_three_way_conflicts(self) -> None:
+        store = Store(self.out / "context.db")
+        store.init_schema()
+        store.reset()
+        sources = [
+            store.upsert_source(
+                dataset_path=f"{label}.json",
+                record_id=label,
+                kind="test",
+                payload={"budget": value},
+                raw_ref=f"{label}.json#{label}",
+                run_id="run",
+                force=True,
+            )
+            for label, value in (("a", "100"), ("b", "200"), ("c", "300"))
+        ]
+        store.upsert_entity(
+            entity_id="project:three-way",
+            entity_type="project",
+            name="Three Way Project",
+            path="company/projects/three-way.md",
+        )
+        for source, value in zip(sources, ("100", "200", "300")):
+            store.upsert_fact(
+                subject_id="project:three-way",
+                predicate="budget",
+                source_id=source.id,
+                run_id="run",
+                value=value,
+                confidence=0.9,
+            )
+        builder = ContextBuilder(store, self.dataset, "run", force=False, use_llm=True)
+        calls = []
+
+        def fake_llm(*args, **kwargs):
+            calls.append((args, kwargs))
+            return {"resolution": "auto_resolve", "winner": "A"}
+
+        builder._llm_resolve_conflict = fake_llm
+        builder.detect_conflicts()
+        self.assertEqual(calls, [])
+        self.assertEqual(store.row("SELECT COUNT(*) AS count FROM review_items")["count"], 1)
+        self.assertEqual(store.row("SELECT COUNT(*) AS count FROM facts WHERE status = 'rejected'")["count"], 0)
+        store.close()
+
+    def test_temporal_recency_uses_parsed_dates(self) -> None:
+        store = Store(self.out / "context.db")
+        store.init_schema()
+        try:
+            builder = ContextBuilder(store, self.dataset, "run", force=False)
+            winner, reason = builder._auto_resolve(
+                [
+                    {
+                        "id": "fact:old",
+                        "subject_id": "ticket:date",
+                        "predicate": "status",
+                        "value": "open",
+                        "confidence": 0.9,
+                        "dataset_path": "a.json",
+                        "raw_json": json.dumps({"date": "9/01/2024"}),
+                    },
+                    {
+                        "id": "fact:new",
+                        "subject_id": "ticket:date",
+                        "predicate": "status",
+                        "value": "closed",
+                        "confidence": 0.9,
+                        "dataset_path": "b.json",
+                        "raw_json": json.dumps({"date": "10/01/2024"}),
+                    },
+                ]
+            )
+            self.assertEqual(winner, "fact:new")
+            self.assertEqual(reason, "temporal_recency_10/01/2024")
+        finally:
+            store.close()
+
     def test_source_of_truth_auto_resolves_employee_department(self) -> None:
         store = Store(self.out / "context.db")
         store.init_schema()
@@ -507,6 +654,106 @@ class ContextBaseTests(unittest.TestCase):
             store.row("SELECT status FROM facts WHERE id = ?", (other_fact,))["status"],
             "rejected",
         )
+        store.close()
+
+    def test_resume_name_mismatch_without_email_owner_does_not_create_review(self) -> None:
+        store = Store(self.out / "context.db")
+        store.init_schema()
+        store.reset()
+        hr_source = store.upsert_source(
+            dataset_path="Human_Resource_Management/Employees/employees.json",
+            record_id="emp_1",
+            kind="employee",
+            payload={"Name": "Alice Example", "email": "alice@example.com"},
+            raw_ref="hr#emp_1",
+            run_id="run",
+            force=True,
+        )
+        resume_source = store.upsert_source(
+            dataset_path="Human_Resource_Management/Resume/resume_information.csv",
+            record_id="resume_1",
+            kind="resume",
+            payload={"name": "Different Person", "email": "different@example.com"},
+            raw_ref="resume#resume_1",
+            run_id="run",
+            force=True,
+        )
+        store.upsert_entity(
+            entity_id="employee:emp_1",
+            entity_type="employee",
+            name="Alice Example",
+            path="company/employees/emp_1.md",
+            aliases=["alice@example.com", "emp_1"],
+        )
+        store.upsert_fact(
+            subject_id="employee:emp_1",
+            predicate="email",
+            source_id=hr_source.id,
+            run_id="run",
+            value="alice@example.com",
+        )
+        builder = ContextBuilder(store, self.dataset, "run", force=False)
+        builder._review_resume_identity(
+            "employee:emp_1",
+            resume_source.id,
+            {"name": "Different Person", "email": "different@example.com"},
+        )
+        self.assertEqual(store.row("SELECT COUNT(*) AS count FROM review_items")["count"], 0)
+        store.close()
+
+    def test_resume_email_owned_by_another_employee_creates_identity_review(self) -> None:
+        store = Store(self.out / "context.db")
+        store.init_schema()
+        store.reset()
+        hr_source = store.upsert_source(
+            dataset_path="Human_Resource_Management/Employees/employees.json",
+            record_id="emp_1",
+            kind="employee",
+            payload={"Name": "Alice Example", "email": "alice@example.com"},
+            raw_ref="hr#emp_1",
+            run_id="run",
+            force=True,
+        )
+        resume_source = store.upsert_source(
+            dataset_path="Human_Resource_Management/Resume/resume_information.csv",
+            record_id="resume_1",
+            kind="resume",
+            payload={"name": "Bob Example", "email": "bob@example.com"},
+            raw_ref="resume#resume_1",
+            run_id="run",
+            force=True,
+        )
+        store.upsert_entity(
+            entity_id="employee:emp_1",
+            entity_type="employee",
+            name="Alice Example",
+            path="company/employees/emp_1.md",
+            aliases=["alice@example.com", "emp_1"],
+        )
+        store.upsert_entity(
+            entity_id="employee:emp_2",
+            entity_type="employee",
+            name="Bob Example",
+            path="company/employees/emp_2.md",
+            aliases=["bob@example.com", "emp_2"],
+        )
+        store.upsert_fact(
+            subject_id="employee:emp_1",
+            predicate="email",
+            source_id=hr_source.id,
+            run_id="run",
+            value="alice@example.com",
+        )
+        builder = ContextBuilder(store, self.dataset, "run", force=False)
+        builder._review_resume_identity(
+            "employee:emp_1",
+            resume_source.id,
+            {"name": "Bob Example", "email": "bob@example.com"},
+        )
+        review = store.row("SELECT * FROM review_items")
+        self.assertIsNotNone(review)
+        self.assertEqual(review["conflict_type"], "identity_mismatch")
+        self.assertIn("employee:emp_2", review["candidates_json"])
         store.close()
 
     def test_schema_extractor_ingests_generic_source(self) -> None:
