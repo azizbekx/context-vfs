@@ -125,5 +125,27 @@ To attach the Qontext brain to your AI agent (like Claude Desktop or Cursor), si
 }
 ```
 
+You can point the MCP server at a non-default build output with either an
+environment variable or an argument:
+
+```bash
+CONTEXT_BASE_OUT_DIR=context_base_demo_out python3 mcp_server.py
+python3 mcp_server.py --out-dir context_base_demo_out
+```
+
+Agent tools exposed by the MCP server:
+
+- `get_context_base_status`: graph, source, review, and VFS counts.
+- `search_context`: retrieve relevant entities, facts, and VFS files.
+- `get_entity_context`: inspect facts and graph neighbors for an entity.
+- `read_vfs_file`: read generated markdown from the VFS.
+- `list_vfs_files`: list generated VFS files.
+- `get_fact_source`: inspect raw source provenance for a fact.
+- `list_review_items`: inspect unresolved human-review conflicts.
+- `resolve_review_item`: resolve a review item and regenerate the VFS.
+- `add_entity_fact`: add a confirmed manual agent/human annotation.
+
+For a repeatable judge workflow, see `SKILLS.md`.
+
 ## Legacy Features
 This repository also contains a localized `policy_agent.py` which demonstrates a raw RAG setup over PDFs. You can interact with it via `python3 policy_agent.py ask "What is the password policy?"`.

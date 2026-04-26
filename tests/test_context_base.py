@@ -588,6 +588,59 @@ class ContextBaseTests(unittest.TestCase):
         text = (self.out / "vfs/company/employees/emp_1.md").read_text(encoding="utf-8")
         self.assertIn("API-confirmed context note.", text)
 
+    def test_mcp_tools_support_agent_judgement_workflow(self) -> None:
+        store = self._build()
+        store.close()
+
+        import mcp_server
+
+        original_out_dir = mcp_server.DEFAULT_OUT_DIR
+        mcp_server.set_out_dir(self.out)
+        try:
+            status = json.loads(mcp_server.get_context_base_status())
+            self.assertGreater(status["entities"], 0)
+            self.assertGreater(status["facts"], 0)
+            self.assertGreater(status["vfs_files"], 0)
+
+            search_payload = json.loads(mcp_server.search_context("VPN engineering"))
+            self.assertTrue(
+                any(item.get("entity_id") == "ticket:T1" for item in search_payload["results"])
+            )
+
+            entity_payload = json.loads(mcp_server.get_entity_context("ticket:T1"))
+            fact_ids = {item["predicate"]: item["id"] for item in entity_payload["facts"]}
+            self.assertEqual(entity_payload["entity"]["path"], "company/tickets/t1.md")
+            self.assertIn("issue", fact_ids)
+            self.assertTrue(entity_payload["neighbors"])
+
+            vfs_text = mcp_server.read_vfs_file("company/tickets/t1.md")
+            self.assertIn("## Provenance", vfs_text)
+            self.assertIn("IT_Service_Management/it_tickets.json#T1", vfs_text)
+
+            source_payload = json.loads(mcp_server.get_fact_source(fact_ids["issue"]))
+            self.assertEqual(
+                source_payload["fact"]["dataset_path"],
+                "IT_Service_Management/it_tickets.json",
+            )
+
+            reviews = json.loads(mcp_server.list_review_items(limit=5))
+            self.assertEqual(reviews["status"], "open")
+
+            write_payload = json.loads(
+                mcp_server.add_entity_fact(
+                    "ticket:T1",
+                    "judge_note",
+                    "Agent verified this ticket has source-backed VPN context.",
+                )
+            )
+            self.assertTrue(write_payload["ok"])
+            updated_text = (self.out / "vfs/company/tickets/t1.md").read_text(
+                encoding="utf-8"
+            )
+            self.assertIn("Agent verified this ticket", updated_text)
+        finally:
+            mcp_server.set_out_dir(original_out_dir)
+
 
 if __name__ == "__main__":
     unittest.main()
