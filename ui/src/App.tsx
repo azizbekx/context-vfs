@@ -1,9 +1,10 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
-import { Hexagon, Search, Folder, FileText, ChevronRight, ChevronDown, AlertTriangle, Plus, Trash2, Save, X, Edit3, Eye, Code, RefreshCw, Database, GitBranch, ClipboardList, ShieldCheck, Route, CheckCircle2, LayoutDashboard, ShieldAlert } from 'lucide-react';
+import { Hexagon, Search, Folder, FileText, ChevronRight, ChevronDown, AlertTriangle, Plus, Trash2, Save, X, Edit3, Eye, Code, RefreshCw, Database, GitBranch, ClipboardList, ShieldCheck, Route, CheckCircle2, LayoutDashboard, ShieldAlert, Network } from 'lucide-react';
 import { fetchTree, fetchEntity, fetchNeighbors, fetchFile, search, fetchReviews, resolveReview, createEntity, addFact, editFact, deleteFact, deleteEntity, fetchStats, fetchFactSources } from './api';
 import Dashboard from './components/Dashboard';
 import MarkdownRenderer from './components/MarkdownRenderer';
 import ReviewQueue from './components/ReviewQueue';
+import NetworkGraph from './components/NetworkGraph';
 
 type View = 'dashboard' | 'browser' | 'reviews';
 
@@ -68,6 +69,7 @@ export default function App() {
   const [sourcePanel, setSourcePanel] = useState<any>(null);
   const [stats, setStats] = useState<any>(null);
   const [entityNames, setEntityNames] = useState<Record<string, string>>({});
+  const [contentTab, setContentTab] = useState<'details' | 'graph'>('details');
   const entityNamesRef = useRef<Record<string, string>>({});
 
   const refresh = useCallback(() => {
@@ -88,7 +90,7 @@ export default function App() {
   };
 
   const selectNode = async (node: any) => {
-    setSelectedNode(node); setEntity(null); setNeighbors([]); setFileContent(null); setErr(null); setRawMode(false);
+    setSelectedNode(node); setEntity(null); setNeighbors([]); setFileContent(null); setErr(null); setRawMode(false); setContentTab('details');
     if (node.type === 'file' && node.originalPath) {
       setLoading(true);
       try {
@@ -209,7 +211,13 @@ export default function App() {
               <div className="main-toolbar">
                 <Breadcrumb path={selectedNode?.id ?? null} />
                 <div className="main-toolbar-actions">
-                  {fileContent && <>
+                  {entity && (
+                    <div className="content-tab-toggle">
+                      <button className={`content-tab-btn ${contentTab === 'details' ? 'active' : ''}`} onClick={() => setContentTab('details')}><ClipboardList size={13} />Details</button>
+                      <button className={`content-tab-btn ${contentTab === 'graph' ? 'active' : ''}`} onClick={() => setContentTab('graph')}><Network size={13} />Graph</button>
+                    </div>
+                  )}
+                  {fileContent && contentTab === 'details' && <>
                     <button className={`btn-sm ${!rawMode ? 'btn-primary' : ''}`} onClick={() => setRawMode(false)}><Eye size={13} /> Preview</button>
                     <button className={`btn-sm ${rawMode ? 'btn-primary' : ''}`} onClick={() => setRawMode(true)}><Code size={13} /> Raw</button>
                   </>}
@@ -217,12 +225,14 @@ export default function App() {
                   <button className="btn-sm btn-primary" onClick={() => setShowCreateModal(true)}><Plus size={13} /> Entity</button>
                 </div>
               </div>
-              <div className="main-body">
+              <div className={`main-body ${contentTab === 'graph' && entity ? 'main-body--graph' : ''}`}>
                 {loading ? <div className="loading-center"><div className="spinner" /></div> :
-                 fileContent && !entity ? (
+                 contentTab === 'graph' && entity ? (
+                   <NetworkGraph entity={entity} neighbors={neighbors} onNodeClick={loadEntity} />
+                 ) : fileContent && !entity ? (
                    <div className="doc-card">{rawMode ? <pre className="raw-view">{fileContent}</pre> : <MarkdownRenderer content={fileContent} />}</div>
                  ) : entity ? (
-                   <GraphView entity={entity} neighbors={neighbors} onNodeClick={loadEntity} fileContent={fileContent} rawMode={rawMode} />
+                   <DetailsView entity={entity} neighbors={neighbors} onNodeClick={loadEntity} fileContent={fileContent} rawMode={rawMode} />
                  ) : (
                    <div className="empty-state"><Folder size={36} /><p>Select a file from the VFS or search for an entity to begin.</p></div>
                  )}
@@ -371,8 +381,8 @@ export default function App() {
   );
 }
 
-/* ── Graph View ── */
-function GraphView({ entity, neighbors, onNodeClick, fileContent, rawMode }: any) {
+/* ── Details View (was GraphView) ── */
+function DetailsView({ entity, neighbors, onNodeClick, fileContent, rawMode }: any) {
   if (!entity) return null;
 
   const facts = entity.facts || [];
