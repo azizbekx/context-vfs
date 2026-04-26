@@ -10,6 +10,7 @@ Public surface:
 """
 
 from .decisions import resolve_cluster, ResolvedDecision
+from .policy_check import find_incidents, Incident
 from .providers import LLMProvider, OllamaProvider, GeminiProvider
 from .risk import RiskAssessment, assess_risk
 from .types import ClusterPayload, Member
@@ -17,6 +18,8 @@ from .types import ClusterPayload, Member
 __all__ = [
     "resolve_cluster",
     "ResolvedDecision",
+    "find_incidents",
+    "Incident",
     "ClusterPayload",
     "Member",
     "LLMProvider",
