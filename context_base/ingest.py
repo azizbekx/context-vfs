@@ -832,6 +832,7 @@ class ContextBuilder:
             conflict_type = "fact_value_conflict"
             suggested = self._build_fallback_suggestion(row, facts)
 
+
             candidates = []
             for index, fact in enumerate(facts, start=1):
                 candidates.append(
