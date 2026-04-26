@@ -173,7 +173,7 @@ export default function App() {
             {/* Main content */}
             <main className="col-main">
               <div className="main-toolbar">
-                <span className="main-toolbar-path">{selectedNode ? selectedNode.id : 'No file selected'}</span>
+                <Breadcrumb path={selectedNode?.id ?? null} />
                 <div className="main-toolbar-actions">
                   {fileContent && <>
                     <button className={`btn-sm ${!rawMode ? 'btn-primary' : ''}`} onClick={() => setRawMode(false)}><Eye size={13} /> Preview</button>
@@ -466,6 +466,22 @@ function sourceLabel(f: any) {
     return `${parts[parts.length - 1]}#${f.record_id}`;
   }
   return f.raw_ref || f.source_id;
+}
+
+/* ── Breadcrumb ── */
+function Breadcrumb({ path }: { path: string | null }) {
+  if (!path) return <span className="breadcrumb-empty">No file selected</span>;
+  const parts = path.split('/');
+  return (
+    <div className="breadcrumb">
+      {parts.map((part, i) => (
+        <span key={i} className="breadcrumb-item">
+          {i > 0 && <ChevronRight size={11} />}
+          <span className={i === parts.length - 1 ? 'breadcrumb-current' : 'breadcrumb-segment'}>{part}</span>
+        </span>
+      ))}
+    </div>
+  );
 }
 
 /* ── Tree Node ── */
