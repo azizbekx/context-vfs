@@ -1,10 +1,11 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
-import { Hexagon, Search, Folder, FileText, ChevronRight, ChevronDown, AlertTriangle, Plus, Trash2, Save, X, Edit3, Eye, Code, RefreshCw, Database, GitBranch, ClipboardList, ShieldCheck, Route, CheckCircle2, LayoutDashboard, ShieldAlert, Network } from 'lucide-react';
+import { Hexagon, Search, Folder, FileText, ChevronRight, ChevronDown, AlertTriangle, Plus, Trash2, Save, X, Edit3, Eye, Code, RefreshCw, Database, GitBranch, ClipboardList, ShieldCheck, Route, CheckCircle2, LayoutDashboard, ShieldAlert, Network, GitFork, Sun, Moon } from 'lucide-react';
 import { fetchTree, fetchEntity, fetchNeighbors, fetchFile, search, fetchReviews, resolveReview, createEntity, addFact, editFact, deleteFact, deleteEntity, fetchStats, fetchFactSources } from './api';
 import Dashboard from './components/Dashboard';
 import MarkdownRenderer from './components/MarkdownRenderer';
 import ReviewQueue from './components/ReviewQueue';
 import NetworkGraph from './components/NetworkGraph';
+import DirectedGraph from './components/DirectedGraph';
 
 type View = 'dashboard' | 'browser' | 'reviews';
 
@@ -69,7 +70,11 @@ export default function App() {
   const [sourcePanel, setSourcePanel] = useState<any>(null);
   const [stats, setStats] = useState<any>(null);
   const [entityNames, setEntityNames] = useState<Record<string, string>>({});
-  const [contentTab, setContentTab] = useState<'details' | 'graph'>('details');
+  const [contentTab, setContentTab] = useState<'details' | 'graph' | 'directed'>('details');
+  const [theme, setTheme] = useState<'dark' | 'light'>(() => {
+    const stored = localStorage.getItem('qontext-theme');
+    return stored === 'light' ? 'light' : 'dark';
+  });
   const entityNamesRef = useRef<Record<string, string>>({});
 
   const refresh = useCallback(() => {
@@ -79,6 +84,11 @@ export default function App() {
   }, []);
 
   useEffect(() => { refresh(); }, [refresh]);
+
+  useEffect(() => {
+    document.documentElement.setAttribute('data-theme', theme);
+    localStorage.setItem('qontext-theme', theme);
+  }, [theme]);
 
   const loadEntity = async (id: string) => {
     setLoading(true); setFileContent(null); setErr(null);
@@ -169,6 +179,13 @@ export default function App() {
             <span className="topbar-stat"><strong>{stats.facts?.toLocaleString()}</strong> facts</span>
             {stats.open_reviews > 0 && <span className="review-badge"><AlertTriangle size={12} />{stats.open_reviews} conflicts</span>}
           </>}
+          <button
+            className="theme-toggle"
+            onClick={() => setTheme(t => t === 'dark' ? 'light' : 'dark')}
+            title={`Switch to ${theme === 'dark' ? 'light' : 'dark'} mode`}
+          >
+            {theme === 'dark' ? <Sun size={16} /> : <Moon size={16} />}
+          </button>
         </div>
       </header>
 
@@ -215,6 +232,7 @@ export default function App() {
                     <div className="content-tab-toggle">
                       <button className={`content-tab-btn ${contentTab === 'details' ? 'active' : ''}`} onClick={() => setContentTab('details')}><ClipboardList size={13} />Details</button>
                       <button className={`content-tab-btn ${contentTab === 'graph' ? 'active' : ''}`} onClick={() => setContentTab('graph')}><Network size={13} />Graph</button>
+                      <button className={`content-tab-btn ${contentTab === 'directed' ? 'active' : ''}`} onClick={() => setContentTab('directed')}><GitFork size={13} />Directed</button>
                     </div>
                   )}
                   {fileContent && contentTab === 'details' && <>
@@ -225,10 +243,12 @@ export default function App() {
                   <button className="btn-sm btn-primary" onClick={() => setShowCreateModal(true)}><Plus size={13} /> Entity</button>
                 </div>
               </div>
-              <div className={`main-body ${contentTab === 'graph' && entity ? 'main-body--graph' : ''}`}>
+              <div className={`main-body ${(contentTab === 'graph' || contentTab === 'directed') && entity ? 'main-body--graph' : ''}`}>
                 {loading ? <div className="loading-center"><div className="spinner" /></div> :
                  contentTab === 'graph' && entity ? (
                    <NetworkGraph entity={entity} neighbors={neighbors} onNodeClick={loadEntity} />
+                 ) : contentTab === 'directed' && entity ? (
+                   <DirectedGraph entity={entity} neighbors={neighbors} onNodeClick={loadEntity} />
                  ) : fileContent && !entity ? (
                    <div className="doc-card">{rawMode ? <pre className="raw-view">{fileContent}</pre> : <MarkdownRenderer content={fileContent} />}</div>
                  ) : entity ? (

@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { Database, FileText, GitBranch, AlertTriangle, Layers } from 'lucide-react';
+import { Database, FileText, GitBranch, AlertTriangle, Layers, Hexagon, ShieldCheck, CheckCircle2, Clock, Server } from 'lucide-react';
 import { fetchStats } from '../api';
 
 interface Stats {
@@ -73,6 +73,29 @@ export default function Dashboard() {
     { label: 'Open Reviews', value: stats.open_reviews, Icon: AlertTriangle, color: '#FCD34D', soft: 'rgba(252,211,77,.12)' },
   ];
 
+  const edgesByType = stats.edges_by_type && Object.keys(stats.edges_by_type).length > 0
+    ? Object.entries(stats.edges_by_type).sort(([, a], [, b]) => b - a)
+    : null;
+
+  const typeEntries = Object.entries(stats.by_type).sort(([, a], [, b]) => b - a);
+
+  const DATA_SOURCE_META: Record<string, { label: string; icon: string }> = {
+    employee: { label: 'HR / People', icon: '👤' },
+    client: { label: 'B2B Clients', icon: '🏢' },
+    customer: { label: 'B2C Customers', icon: '🛒' },
+    product: { label: 'Product Catalog', icon: '📦' },
+    email_thread: { label: 'Email System', icon: '✉️' },
+    conversation: { label: 'Chat Platform', icon: '💬' },
+    ticket: { label: 'IT Ticketing', icon: '🎫' },
+    repo: { label: 'GitHub Repos', icon: '💻' },
+    policy: { label: 'Policy Docs', icon: '📋' },
+    project: { label: 'Project Tracker', icon: '📊' },
+    qa_post: { label: 'Internal Q&A', icon: '❓' },
+    social_post: { label: 'Social Platform', icon: '📣' },
+    order: { label: 'Order PDFs', icon: '🧾' },
+    review: { label: 'Product Reviews', icon: '⭐' },
+  };
+
   return (
     <div className="dashboard">
       <div className="dash-header">
@@ -101,6 +124,94 @@ export default function Dashboard() {
         {stats.edges_by_type && Object.keys(stats.edges_by_type).length > 0 && (
           <BarChart data={stats.edges_by_type} title="Edges by Type" />
         )}
+      </div>
+
+      {/* ── Two-column: Knowledge Graph + Conflict Resolution ── */}
+      <div className="dash-two-col">
+        <div className="dash-panel">
+          <div className="dash-panel-header">
+            <Hexagon size={14} />
+            <span>Knowledge Graph</span>
+          </div>
+          <div className="dash-panel-body">
+            <p className="dash-panel-hero">
+              <strong>{stats.entities.toLocaleString()}</strong> entities connected by{' '}
+              <strong>{stats.edges.toLocaleString()}</strong> relationships across{' '}
+              <strong>{stats.sources.toLocaleString()}</strong> data sources
+            </p>
+            {edgesByType && (
+              <div className="dash-pill-grid">
+                {edgesByType.slice(0, 12).map(([type, count]) => (
+                  <span key={type} className="dash-pill">
+                    <span className="dash-pill-label">{type}</span>
+                    <span className="dash-pill-count">{count.toLocaleString()}</span>
+                  </span>
+                ))}
+              </div>
+            )}
+          </div>
+        </div>
+
+        <div className="dash-panel">
+          <div className="dash-panel-header">
+            <ShieldCheck size={14} />
+            <span>Conflict Resolution</span>
+          </div>
+          <div className="dash-panel-body">
+            <ConflictBar open={stats.open_reviews} />
+            <div className="dash-conflict-legend">
+              <span className="dash-conflict-legend-item">
+                <Clock size={12} />
+                <strong>{stats.open_reviews.toLocaleString()}</strong> pending review
+              </span>
+            </div>
+            <p className="dash-conflict-note">
+              Conflicting facts from overlapping sources are flagged automatically.
+              Each review surfaces the competing values with provenance and confidence scores.
+            </p>
+          </div>
+        </div>
+      </div>
+
+      {/* ── Data Source Coverage ── */}
+      <div className="dash-sources-section">
+        <div className="dash-panel-header" style={{ marginBottom: 16 }}>
+          <Server size={14} />
+          <span>Ingested Data Sources</span>
+        </div>
+        <div className="dash-source-grid">
+          {typeEntries.map(([type, count]) => {
+            const meta = DATA_SOURCE_META[type];
+            return (
+              <div key={type} className="dash-source-card">
+                <div className="dash-source-card-top">
+                  <span className="dash-source-icon">{meta?.icon ?? '📁'}</span>
+                  <CheckCircle2 size={12} className="dash-source-status" />
+                </div>
+                <div className="dash-source-name">{meta?.label ?? type}</div>
+                <div className="dash-source-type">{type}</div>
+                <div className="dash-source-count">{count.toLocaleString()} entities</div>
+              </div>
+            );
+          })}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function ConflictBar({ open }: { open: number }) {
+  return (
+    <div className="dash-conflict-bar-wrap">
+      <div className="dash-conflict-bar">
+        <div
+          className="dash-conflict-bar-seg dash-conflict-bar-pending"
+          style={{ width: '100%' }}
+          title={`${open} pending`}
+        />
+      </div>
+      <div className="dash-conflict-bar-labels">
+        <span>{open.toLocaleString()} pending</span>
       </div>
     </div>
   );
