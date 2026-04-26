@@ -8,8 +8,9 @@ import {
   X,
   Save,
   Sparkles,
+  Globe,
 } from 'lucide-react';
-import { fetchReviews, resolveReview, fetchFactSources, fetchEntity } from '../api';
+import { fetchReviews, resolveReview, fetchFactSources, fetchEntity, webSearchReview } from '../api';
 
 /**
  * Dedicated Review Queue page. Renders one row per open review_items
@@ -145,13 +146,25 @@ export default function ReviewQueue({ onNavigateToEntity }: ReviewQueueProps) {
   const [sourcePanelLoading, setSourcePanelLoading] = useState(false);
 
   // Lazy caches keyed by id so re-selecting hits the cache.
-  // - entityCache: /entities/{id} payload (entity + facts + edges).
-  //   Not displayed in the UI — used internally to resolve a fallback
-  //   fact_id for synthesized candidates that have no fact_id of their own.
-  // - factSourceCache: /facts/{id}/sources `fact` objects, each carrying
-  //   the raw_json column from the dataset row that produced the value.
   const [entityCache, setEntityCache] = useState<Record<string, any>>({});
   const [factSourceCache, setFactSourceCache] = useState<Record<string, any>>({});
+
+  // Web search state per review id
+  const [webSearchResults, setWebSearchResults] = useState<Record<string, { query: string; results: any[] }>>({});
+  const [webSearchLoading, setWebSearchLoading] = useState<string | null>(null);
+
+  const handleWebSearch = useCallback(async (reviewId: string) => {
+    if (webSearchLoading) return;
+    setWebSearchLoading(reviewId);
+    try {
+      const data = await webSearchReview(reviewId);
+      setWebSearchResults((prev) => ({ ...prev, [reviewId]: data }));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Web search failed.');
+    } finally {
+      setWebSearchLoading(null);
+    }
+  }, [webSearchLoading]);
 
   const refresh = useCallback(async () => {
     setLoading(true);
@@ -392,6 +405,9 @@ export default function ReviewQueue({ onNavigateToEntity }: ReviewQueueProps) {
             onNavigateToEntity={onNavigateToEntity}
             factSources={factSourceCache}
             entityFacts={entityCache[selected.entity_id]?.facts}
+            onWebSearch={handleWebSearch}
+            webSearchData={webSearchResults[selected.id]}
+            webSearchLoading={webSearchLoading === selected.id}
           />
         )}
       </main>
@@ -428,6 +444,9 @@ function ReviewDetail({
   onNavigateToEntity,
   factSources,
   entityFacts,
+  onWebSearch,
+  webSearchData,
+  webSearchLoading,
 }: {
   review: ReviewItem;
   resolving: boolean;
@@ -436,6 +455,9 @@ function ReviewDetail({
   onNavigateToEntity?: (entityId: string) => void;
   factSources: Record<string, any>;
   entityFacts?: any[];
+  onWebSearch: (reviewId: string) => void;
+  webSearchData?: { query: string; results: any[] };
+  webSearchLoading: boolean;
 }) {
   const candidates = useMemo(
     () => parseCandidates(review.candidates_json),
@@ -493,7 +515,47 @@ function ReviewDetail({
             </div>
           </div>
         )}
+
+        <div style={{ marginTop: 8 }}>
+          <button
+            className="btn-sm"
+            onClick={() => onWebSearch(review.id)}
+            disabled={webSearchLoading}
+            title="Search the web for context about this conflict"
+          >
+            <Globe size={12} />
+            {webSearchLoading ? 'Searching…' : 'Search Web'}
+          </button>
+        </div>
       </header>
+
+      {webSearchData && (
+        <div className="rq-web-results">
+          <div className="rq-web-results-header">
+            <Globe size={13} />
+            <span>Web results for: <em>{webSearchData.query}</em></span>
+          </div>
+          {webSearchData.results.length === 0 ? (
+            <div className="rq-web-no-results">No web results found.</div>
+          ) : (
+            <div className="rq-web-results-list">
+              {webSearchData.results.map((r: any, i: number) => (
+                <div key={i} className="rq-web-result-item">
+                  <a
+                    href={r.url}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="rq-web-result-title"
+                  >
+                    {r.title} <ExternalLink size={10} />
+                  </a>
+                  <p className="rq-web-result-snippet">{r.content?.slice(0, 300)}</p>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
 
       {/* Inline diff bar — one-liner, only when both sides parse as same numeric */}
       <InlineDiffBar a={anchor?.value} b={variant?.value} predicate={review.predicate} />
