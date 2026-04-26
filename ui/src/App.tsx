@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { Hexagon, Search, Folder, FileText, ChevronRight, ChevronDown, AlertTriangle, Plus, Trash2, Save, X, Edit3, Eye, Code, RefreshCw, Database, GitBranch, ClipboardList, ShieldCheck, Route, CheckCircle2, LayoutDashboard, ShieldAlert } from 'lucide-react';
 import { fetchTree, fetchEntity, fetchNeighbors, fetchFile, search, fetchReviews, resolveReview, createEntity, addFact, editFact, deleteFact, deleteEntity, fetchStats, fetchFactSources } from './api';
 import Dashboard from './components/Dashboard';
@@ -30,6 +30,21 @@ function buildTree(paths: string[]) {
   return root.children;
 }
 
+function extractNameFromContent(content: string): string | null {
+  if (!content) return null;
+  const h1 = content.match(/^#\s+(.+)$/m);
+  if (h1) return h1[1].trim().slice(0, 40);
+  const bold = content.match(/\*\*[Nn]ame\*\*[:\s]+([^\n*]+)/);
+  if (bold) return bold[1].trim().slice(0, 40);
+  const nameField = content.slice(0, 500).match(/^[Nn]ame[:\s]+(.+)$/m);
+  if (nameField) return nameField[1].trim().slice(0, 40);
+  return null;
+}
+
+function treeLabel(str: string, max = 36): string {
+  return str.length > max ? str.slice(0, max - 1) + '…' : str;
+}
+
 export default function App() {
   const [view, setView] = useState<View>('browser');
   const [tree, setTree] = useState<any[]>([]);
@@ -52,6 +67,8 @@ export default function App() {
   const [err, setErr] = useState<string | null>(null);
   const [sourcePanel, setSourcePanel] = useState<any>(null);
   const [stats, setStats] = useState<any>(null);
+  const [entityNames, setEntityNames] = useState<Record<string, string>>({});
+  const entityNamesRef = useRef<Record<string, string>>({});
 
   const refresh = useCallback(() => {
     fetchTree().then(d => d?.files && setTree(buildTree(d.files))).catch(() => {});
@@ -90,6 +107,23 @@ export default function App() {
   };
 
   const clearSearch = () => { setQuery(''); setResults([]); setHasSearched(false); setSideTab('files'); };
+
+  const resolveFileNames = useCallback(async (fileNodes: any[]) => {
+    const toFetch = fileNodes.filter(n => n.originalPath && entityNamesRef.current[n.id] === undefined);
+    if (!toFetch.length) return;
+    toFetch.forEach(n => { entityNamesRef.current[n.id] = ''; }); // mark in-flight
+    const updates: Record<string, string> = {};
+    await Promise.allSettled(
+      toFetch.slice(0, 50).map(async n => {
+        try {
+          const f = await fetchFile(n.originalPath);
+          const name = extractNameFromContent(f.content);
+          if (name) { updates[n.id] = name; entityNamesRef.current[n.id] = name; }
+        } catch { /* fall back to raw filename */ }
+      })
+    );
+    if (Object.keys(updates).length) setEntityNames(prev => ({ ...prev, ...updates }));
+  }, []);
 
   const handleResolve = async (rid: string, choice: string) => {
     try { await resolveReview(rid, choice); refresh(); if (entity) loadEntity(entity.entity.id); }
@@ -156,7 +190,7 @@ export default function App() {
               </div>
               <div className="sidebar-list">
                 {sideTab === 'files' ? (
-                  tree.map(n => <TreeNode key={n.id} node={n} level={0} onSelect={selectNode} selectedId={selectedNode?.id} />)
+                  tree.map(n => <TreeNode key={n.id} node={n} level={0} onSelect={selectNode} selectedId={selectedNode?.id} entityNames={entityNames} onExpandFolder={resolveFileNames} />)
                 ) : (
                   searching ? <div className="loading-center"><div className="spinner" /></div> :
                   results.length === 0 && hasSearched ? <div style={{ padding: 16, fontSize: 13, color: 'var(--muted)' }}>No results found.</div> :
@@ -485,22 +519,73 @@ function Breadcrumb({ path }: { path: string | null }) {
 }
 
 /* ── Tree Node ── */
-function TreeNode({ node, level, onSelect, selectedId }: any) {
+function TreeNode({ node, level, onSelect, selectedId, entityNames, onExpandFolder }: any) {
   const [open, setOpen] = useState(node.isOpen || false);
   const isFolder = node.type === 'folder';
   const LIMIT = 100;
+
+  const rawId = node.name.replace(/\.md$/, '');
+  const resolved = entityNames?.[node.id];
+  const primaryLabel = resolved || rawId;
+  const showRawId = !!(resolved && resolved !== rawId);
+
+  const handleClick = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    if (isFolder) {
+      const next = !open;
+      setOpen(next);
+      if (next && node.children && onExpandFolder) {
+        onExpandFolder(node.children.filter((c: any) => c.type === 'file'));
+      }
+    } else {
+      onSelect(node);
+    }
+  };
+
   return (
     <div>
-      <div className={`tree-item ${node.id === selectedId ? 'active' : ''}`} style={{ paddingLeft: level * 16 + 8 }}
-        onClick={e => { e.stopPropagation(); isFolder ? setOpen(!open) : onSelect(node); }}>
-        {isFolder ? (open ? <ChevronDown size={14} /> : <ChevronRight size={14} />) : <span style={{ width: 14 }} />}
-        {isFolder ? <Folder size={14} color="var(--accent)" /> : <FileText size={14} color="var(--muted)" />}
-        <span className="tree-label" title={node.name}>{node.name}</span>
+      <div
+        className={`tree-item ${node.id === selectedId ? 'active' : ''}`}
+        style={{ paddingLeft: level * 16 + 8 }}
+        onClick={handleClick}
+      >
+        <span className="tree-item-toggle">
+          {isFolder ? (open ? <ChevronDown size={13} /> : <ChevronRight size={13} />) : null}
+        </span>
+        {isFolder
+          ? <Folder size={14} style={{ color: 'var(--accent)', flexShrink: 0 }} />
+          : <FileText size={14} style={{ color: 'var(--muted)', flexShrink: 0 }} />
+        }
+        <span className="tree-item-name">
+          <span className="tree-item-primary">{treeLabel(primaryLabel)}</span>
+          {showRawId && <span className="tree-item-rawid">{rawId}</span>}
+        </span>
+        {isFolder && (node.children?.length ?? 0) > 0 && (
+          <span className="tree-item-count">{node.children.length}</span>
+        )}
       </div>
-      {isFolder && open && node.children && <>
-        {node.children.slice(0, LIMIT).map((c: any) => <TreeNode key={c.id} node={c} level={level + 1} onSelect={onSelect} selectedId={selectedId} />)}
-        {node.children.length > LIMIT && <div className="tree-more" style={{ paddingLeft: (level + 1) * 16 + 8 }}>+ {node.children.length - LIMIT} more</div>}
-      </>}
+
+      {isFolder && (
+        <div
+          className={`tree-children ${open ? 'is-open' : ''}`}
+          style={{ '--guide-left': `${level * 16 + 20}px` } as React.CSSProperties}
+        >
+          <div className="tree-children-inner">
+            {open && node.children?.slice(0, LIMIT).map((c: any) => (
+              <TreeNode
+                key={c.id} node={c} level={level + 1}
+                onSelect={onSelect} selectedId={selectedId}
+                entityNames={entityNames} onExpandFolder={onExpandFolder}
+              />
+            ))}
+            {open && (node.children?.length ?? 0) > LIMIT && (
+              <div className="tree-more" style={{ paddingLeft: (level + 1) * 16 + 8 }}>
+                + {node.children.length - LIMIT} more
+              </div>
+            )}
+          </div>
+        </div>
+      )}
     </div>
   );
 }
