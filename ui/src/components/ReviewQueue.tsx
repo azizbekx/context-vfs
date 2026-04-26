@@ -9,7 +9,7 @@ import {
   Save,
   Sparkles,
 } from 'lucide-react';
-import { fetchReviews, resolveReview, fetchFactSources } from '../api';
+import { fetchReviews, resolveReview, fetchFactSources, fetchEntity } from '../api';
 
 /**
  * Dedicated Review Queue page. Renders one row per open review_items
@@ -108,6 +108,28 @@ function reviewVfsPath(reviewId: string): string {
   return `company/reviews/conflicts/${reviewId.replace(/:/g, '-')}.md`;
 }
 
+/**
+ * For synthesized candidates that don't have a fact_id of their own
+ * (e.g. ingest.py l.875 "investigate-resume" choice), fall back to
+ * any fact on the same entity that was extracted from the same source
+ * row. That fact's fact_id gives us a way to pull the dataset's
+ * raw_json so the variant card can show the same preview as the anchor.
+ */
+function resolveFactIdFromSource(
+  source: string | undefined,
+  entityFacts: any[] | undefined
+): string | null {
+  if (!source || !entityFacts) return null;
+  const idx = source.indexOf('#');
+  if (idx < 0) return null;
+  const path = source.slice(0, idx);
+  const recordId = source.slice(idx + 1);
+  const match = entityFacts.find(
+    (f) => f.dataset_path === path && f.record_id === recordId && f.id
+  );
+  return match?.id ?? null;
+}
+
 /* ──────────────────────────────────────────────────────────────────── */
 /* Top-level component                                                   */
 /* ──────────────────────────────────────────────────────────────────── */
@@ -121,6 +143,15 @@ export default function ReviewQueue({ onNavigateToEntity }: ReviewQueueProps) {
   const [reviewedIds, setReviewedIds] = useState<Set<string>>(new Set());
   const [sourcePanel, setSourcePanel] = useState<unknown | null>(null);
   const [sourcePanelLoading, setSourcePanelLoading] = useState(false);
+
+  // Lazy caches keyed by id so re-selecting hits the cache.
+  // - entityCache: /entities/{id} payload (entity + facts + edges).
+  //   Not displayed in the UI — used internally to resolve a fallback
+  //   fact_id for synthesized candidates that have no fact_id of their own.
+  // - factSourceCache: /facts/{id}/sources `fact` objects, each carrying
+  //   the raw_json column from the dataset row that produced the value.
+  const [entityCache, setEntityCache] = useState<Record<string, any>>({});
+  const [factSourceCache, setFactSourceCache] = useState<Record<string, any>>({});
 
   const refresh = useCallback(async () => {
     setLoading(true);
@@ -237,6 +268,41 @@ export default function ReviewQueue({ onNavigateToEntity }: ReviewQueueProps) {
     return () => window.removeEventListener('keydown', onKey);
   }, [reviews, selectedIndex, selected, advanceSelection, handleResolve]);
 
+  // Two-stage prefetch on review selection:
+  //   1. Fetch the entity (silently, used only to resolve fallback fact_ids
+  //      for synthesized candidates).
+  //   2. For each candidate — using the candidate's own fact_id when present,
+  //      or a fact_id from entity.facts matching the same dataset_path +
+  //      record_id when not — fetch /facts/{id}/sources so SourcePreview
+  //      can render the raw row from the dataset.
+  // Fire-and-forget; any failure just leaves the cache empty and the
+  // per-card preview shows its "loading" placeholder until the fetch lands.
+  useEffect(() => {
+    if (!selected) return;
+    const eid = selected.entity_id;
+    if (!entityCache[eid]) {
+      fetchEntity(eid)
+        .then((data: any) => setEntityCache((c) => ({ ...c, [eid]: data })))
+        .catch(() => undefined);
+      return;
+    }
+    const entity = entityCache[eid];
+    const cands = parseCandidates(selected.candidates_json);
+    cands.forEach((c) => {
+      const factId = c.fact_id ?? resolveFactIdFromSource(c.source, entity?.facts);
+      if (factId && !factSourceCache[factId]) {
+        fetchFactSources(factId)
+          .then((data: any) =>
+            setFactSourceCache((cache) => ({
+              ...cache,
+              [factId]: data?.fact ?? data,
+            }))
+          )
+          .catch(() => undefined);
+      }
+    });
+  }, [selected, entityCache, factSourceCache]);
+
   return (
     <div className="rq-shell">
       {/* QUEUE SIDEBAR */}
@@ -324,6 +390,8 @@ export default function ReviewQueue({ onNavigateToEntity }: ReviewQueueProps) {
             onResolve={handleResolve}
             onOpenFactSource={openFactSource}
             onNavigateToEntity={onNavigateToEntity}
+            factSources={factSourceCache}
+            entityFacts={entityCache[selected.entity_id]?.facts}
           />
         )}
       </main>
@@ -358,12 +426,16 @@ function ReviewDetail({
   onResolve,
   onOpenFactSource,
   onNavigateToEntity,
+  factSources,
+  entityFacts,
 }: {
   review: ReviewItem;
   resolving: boolean;
   onResolve: (reviewId: string, choiceId: string) => void;
   onOpenFactSource: (factId: string) => void;
   onNavigateToEntity?: (entityId: string) => void;
+  factSources: Record<string, any>;
+  entityFacts?: any[];
 }) {
   const candidates = useMemo(
     () => parseCandidates(review.candidates_json),
@@ -423,35 +495,64 @@ function ReviewDetail({
         )}
       </header>
 
-      <div className="rq-section-label">
-        Conflicting values · {review.predicate}
-      </div>
+      {/* Inline diff bar — one-liner, only when both sides parse as same numeric */}
+      <InlineDiffBar a={anchor?.value} b={variant?.value} predicate={review.predicate} />
 
-      <div className="rq-cards-grid">
-        {anchor && (
-          <SourceCard
-            candidate={anchor}
-            role="anchor"
-            predicate={review.predicate}
-            disabled={resolving}
-            onAccept={() => onResolve(review.id, anchor.choice_id)}
-            onOpenFactSource={onOpenFactSource}
-          />
-        )}
-        {variant && (
-          <SourceCard
-            candidate={variant}
-            role="variant"
-            predicate={review.predicate}
-            disabled={resolving}
-            onAccept={() => onResolve(review.id, variant.choice_id)}
-            onOpenFactSource={onOpenFactSource}
-          />
-        )}
-        {!anchor && !variant && (
-          <div className="rq-empty">No candidates attached to this review.</div>
-        )}
-      </div>
+      {/* Cards are the hero — section label removed so they sit immediately
+          under the header. Per the latest brief: "die zwei kacheln oben". */}
+
+      {(() => {
+        // Resolve effective fact_ids + factSources up here so we can compute
+        // a shared keyOrder across both raw_jsons → "Age" lines up on both
+        // cards at the same vertical row, "Email" lines up too, etc.
+        const anchorFactId = anchor
+          ? anchor.fact_id ?? resolveFactIdFromSource(anchor.source, entityFacts)
+          : null;
+        const variantFactId = variant
+          ? variant.fact_id ?? resolveFactIdFromSource(variant.source, entityFacts)
+          : null;
+        const anchorFactSource = anchorFactId ? factSources[anchorFactId] : undefined;
+        const variantFactSource = variantFactId ? factSources[variantFactId] : undefined;
+        const sharedKeyOrder = computeSharedKeyOrder(
+          parseRawJson(anchorFactSource?.raw_json),
+          parseRawJson(variantFactSource?.raw_json),
+          review.predicate
+        );
+
+        return (
+          <div className="rq-cards-grid">
+            {anchor && (
+              <SourceCard
+                candidate={anchor}
+                role="anchor"
+                predicate={review.predicate}
+                disabled={resolving}
+                onAccept={() => onResolve(review.id, anchor.choice_id)}
+                onOpenFactSource={onOpenFactSource}
+                effectiveFactId={anchorFactId}
+                factSources={factSources}
+                keyOrder={sharedKeyOrder}
+              />
+            )}
+            {variant && (
+              <SourceCard
+                candidate={variant}
+                role="variant"
+                predicate={review.predicate}
+                disabled={resolving}
+                onAccept={() => onResolve(review.id, variant.choice_id)}
+                onOpenFactSource={onOpenFactSource}
+                effectiveFactId={variantFactId}
+                factSources={factSources}
+                keyOrder={sharedKeyOrder}
+              />
+            )}
+            {!anchor && !variant && (
+              <div className="rq-empty">No candidates attached to this review.</div>
+            )}
+          </div>
+        );
+      })()}
 
       {others.length > 0 && (
         <>
@@ -517,6 +618,9 @@ function SourceCard({
   disabled,
   onAccept,
   onOpenFactSource,
+  effectiveFactId,
+  factSources,
+  keyOrder,
 }: {
   candidate: Candidate;
   role: 'anchor' | 'variant';
@@ -524,10 +628,20 @@ function SourceCard({
   disabled: boolean;
   onAccept: () => void;
   onOpenFactSource: (factId: string) => void;
+  /** The fact_id we should use to fetch the source record. Either the
+   *  candidate's own fact_id or, when synthesized, a fallback from
+   *  entity.facts matching the same dataset_path + record_id. */
+  effectiveFactId: string | null;
+  factSources: Record<string, any>;
+  /** Shared key order computed across both cards' raw_jsons so the same
+   *  field name appears at the same vertical row in both grids. */
+  keyOrder: string[];
 }) {
   const confidence = Math.round((candidate.confidence ?? 0) * 100);
   const value = candidate.value || candidate.object_entity_id || '—';
   const src = parseSource(candidate.source);
+  const factSource = effectiveFactId ? factSources[effectiveFactId] : undefined;
+  const ingestedAt = factSource?.updated_at as string | undefined;
 
   return (
     <div className={`rq-card rq-card--${role}`}>
@@ -566,19 +680,36 @@ function SourceCard({
           </div>
         )}
 
+        {/* File preview — raw_json record fields lazy-loaded via fetchFactSources.
+            Rendered for every card that has a source path (anchor with own
+            fact_id, variant fallback to a sibling fact on the same source row).
+            keyOrder is shared with the other card so rows line up. */}
+        {effectiveFactId && (
+          <SourcePreview
+            factId={effectiveFactId}
+            factSource={factSource}
+            highlightField={predicate}
+            keyOrder={keyOrder}
+          />
+        )}
+
+        {ingestedAt && (
+          <div className="rq-source-ingested">ingested {formatTimestamp(ingestedAt)}</div>
+        )}
+
         <footer className="rq-card-foot">
           <div className="rq-card-foot-meta-col">
             <span className="rq-card-foot-meta">choice_id: {candidate.choice_id}</span>
-            {candidate.fact_id ? (
+            {effectiveFactId ? (
               <button
                 className="rq-link-btn"
-                onClick={() => onOpenFactSource(candidate.fact_id as string)}
+                onClick={() => onOpenFactSource(effectiveFactId)}
                 title="Open the underlying source record from the dataset"
               >
                 <ExternalLink size={11} /> view source record
               </button>
             ) : src ? (
-              <span className="rq-card-foot-meta">no fact_id (synthesized)</span>
+              <span className="rq-card-foot-meta">no fact on file for this row</span>
             ) : null}
           </div>
           <button
@@ -589,6 +720,215 @@ function SourceCard({
             <Save size={12} /> Accept this value <ChevronRight size={12} />
           </button>
         </footer>
+      </div>
+    </div>
+  );
+}
+
+/* ──────────────────────────────────────────────────────────────────── */
+/* Inline diff bar — only shown when both sides parse as same currency  */
+/* ──────────────────────────────────────────────────────────────────── */
+
+function parseAmount(s?: string): { num: number; currency: string } | null {
+  if (!s) return null;
+  const m = s.match(/([A-Z]{2,3}|[€$£¥])\s*([0-9][0-9,.]*)/);
+  if (!m) return null;
+  const num = parseFloat(m[2].replace(/,/g, ''));
+  if (Number.isNaN(num)) return null;
+  return { num, currency: m[1] };
+}
+
+function InlineDiffBar({
+  a,
+  b,
+  predicate,
+}: {
+  a?: string;
+  b?: string;
+  predicate: string;
+}) {
+  const numA = parseAmount(a);
+  const numB = parseAmount(b);
+  if (!numA || !numB || numA.currency !== numB.currency) return null;
+
+  const delta = numB.num - numA.num;
+  const pct = (delta / numA.num) * 100;
+  const sign = delta >= 0 ? '+' : '−';
+  const fmt = Math.abs(delta).toLocaleString('en-US', { maximumFractionDigits: 0 });
+
+  return (
+    <div className="rq-diff-bar">
+      <span className="rq-diff-label">{predicate}</span>
+      <span className="rq-diff-old">{a}</span>
+      <span className="rq-diff-arrow">→</span>
+      <span className="rq-diff-new">{b}</span>
+      <span className="rq-diff-pill">
+        Δ {sign}{numA.currency} {fmt} · {sign}{Math.abs(pct).toFixed(1)}%
+      </span>
+    </div>
+  );
+}
+
+/* ──────────────────────────────────────────────────────────────────── */
+/* Source preview — raw_json from the dataset row, lazy-loaded via      */
+/* fetchFactSources. Highlights the contested predicate so reviewers   */
+/* can see exactly which field came from this row.                      */
+/* ──────────────────────────────────────────────────────────────────── */
+
+function parseRawJson(raw?: string | null): Record<string, unknown> | null {
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(raw);
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+      return parsed as Record<string, unknown>;
+    }
+  } catch { /* ignore */ }
+  return null;
+}
+
+/**
+ * Build a single ordered key list shared by both source cards so the same
+ * data type ("Age", "Email", …) lines up at the same vertical row in
+ * both grids. Order: the contested predicate first, then keys present in
+ * BOTH records (preserving anchor order), then anchor-only, then variant-only.
+ * Capped to N entries so cards don't grow unbounded.
+ */
+function computeSharedKeyOrder(
+  anchor: Record<string, unknown> | null,
+  variant: Record<string, unknown> | null,
+  highlightField: string,
+  limit = 8
+): string[] {
+  const aKeys = anchor ? Object.keys(anchor) : [];
+  const bKeys = variant ? Object.keys(variant) : [];
+  const aSetLower = new Set(aKeys.map((k) => k.toLowerCase()));
+  const bSetLower = new Set(bKeys.map((k) => k.toLowerCase()));
+
+  const result: string[] = [];
+  const seenLower = new Set<string>();
+  const push = (k: string) => {
+    const kl = k.toLowerCase();
+    if (seenLower.has(kl)) return;
+    seenLower.add(kl);
+    result.push(k);
+  };
+
+  // 1. The contested predicate first (whichever side has it)
+  const hl = highlightField.toLowerCase();
+  const fromA = aKeys.find((k) => k.toLowerCase() === hl);
+  const fromB = bKeys.find((k) => k.toLowerCase() === hl);
+  if (fromA) push(fromA);
+  else if (fromB) push(fromB);
+
+  // 2. Keys present in both, preserving anchor order
+  for (const k of aKeys) {
+    if (bSetLower.has(k.toLowerCase())) push(k);
+  }
+  // 3. Anchor-only
+  for (const k of aKeys) push(k);
+  // 4. Variant-only
+  for (const k of bKeys) {
+    if (!aSetLower.has(k.toLowerCase())) push(k);
+  }
+
+  return result.slice(0, limit);
+}
+
+/** Case-insensitive lookup so "Age" / "age" / "AGE" all collapse. */
+function lookupCaseInsensitive(
+  obj: Record<string, unknown> | null,
+  key: string
+): unknown | undefined {
+  if (!obj) return undefined;
+  const kl = key.toLowerCase();
+  for (const k of Object.keys(obj)) {
+    if (k.toLowerCase() === kl) return obj[k];
+  }
+  return undefined;
+}
+
+function SourcePreview({
+  factId,
+  factSource,
+  highlightField,
+  keyOrder,
+}: {
+  factId: string;
+  factSource?: any;
+  highlightField: string;
+  /** Shared with the sibling card so rows line up. When the union is
+   *  smaller than 1, the preview still renders an empty placeholder grid
+   *  so the two cards stay the same height. */
+  keyOrder: string[];
+}) {
+  if (!factSource) {
+    return (
+      <div className="rq-source-preview">
+        <div className="rq-source-preview-head">
+          <span>Source record · loading</span>
+          <span style={{ fontFamily: 'var(--mono)' }}>{factId.slice(0, 16)}</span>
+        </div>
+        <div className="rq-source-preview-body">
+          <div className="rq-source-preview-loading">fetching raw record from dataset…</div>
+        </div>
+      </div>
+    );
+  }
+
+  const raw = parseRawJson(factSource.raw_json);
+  const datasetPath = factSource.dataset_path as string | undefined;
+  const recordId = factSource.record_id as string | undefined;
+
+  // Use the shared keyOrder so the same fields appear at the same vertical
+  // row in both cards. Cells without a value in this card render as "—",
+  // keeping row count and alignment identical across the pair.
+  const entries: Array<[string, string]> = keyOrder.map((k) => {
+    const v = lookupCaseInsensitive(raw, k);
+    if (v == null) return [k, '—'];
+    const text = typeof v === 'object' ? JSON.stringify(v) : String(v);
+    const trimmed = text.length > 220 ? text.slice(0, 220) + '…' : text;
+    return [k, trimmed];
+  });
+
+  return (
+    <div className="rq-source-preview">
+      <div className="rq-source-preview-head">
+        <span>Source record</span>
+        <span style={{ fontFamily: 'var(--mono)' }}>
+          {datasetPath ?? '—'}{recordId ? ` # ${recordId}` : ''}
+        </span>
+      </div>
+      <div className="rq-source-preview-body">
+        {entries.length === 0 ? (
+          <div className="rq-source-preview-loading">no parseable raw_json on this record</div>
+        ) : (
+          <div className="rq-source-preview-grid">
+            {entries.map(([k, v]) => (
+              <div key={k} style={{ display: 'contents' }}>
+                <span
+                  className="rq-source-preview-key"
+                  style={
+                    k.toLowerCase() === highlightField.toLowerCase()
+                      ? { color: 'var(--warning)' }
+                      : undefined
+                  }
+                >
+                  {k}
+                </span>
+                <span
+                  className="rq-source-preview-val"
+                  style={
+                    k.toLowerCase() === highlightField.toLowerCase()
+                      ? { color: 'var(--warning)', fontWeight: 600 }
+                      : undefined
+                  }
+                >
+                  {v}
+                </span>
+              </div>
+            ))}
+          </div>
+        )}
       </div>
     </div>
   );
