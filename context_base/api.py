@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 from typing import Any, Optional
 
@@ -5,6 +6,97 @@ from .search import neighbors, search
 from .storage import Store
 from .utils import now_iso
 from .vfs import VFSGenerator, tree
+
+
+def auto_resolve_review_with_llm(db: Store, review_id: str, resolver=None) -> dict[str, Any]:
+    review = db.row("SELECT * FROM review_items WHERE id = ? AND status = 'open'", (review_id,))
+    if not review:
+        return {"ok": False, "status": "not_found", "message": "Review not found or already resolved."}
+
+    candidates = json.loads(review["candidates_json"] or "[]")
+    if len(candidates) != 2:
+        return {
+            "ok": False,
+            "status": "needs_human_review",
+            "message": "LLM auto-resolve is only enabled for two-candidate reviews.",
+        }
+
+    facts = []
+    for candidate in candidates:
+        fact_id = candidate.get("fact_id")
+        if not fact_id:
+            return {
+                "ok": False,
+                "status": "needs_human_review",
+                "message": "This review has a candidate without a fact_id.",
+            }
+        fact = db.row(
+            """
+            SELECT f.*, s.dataset_path, s.record_id, s.raw_json, s.observed_at
+            FROM facts f
+            JOIN source_records s ON s.id = f.source_id
+            WHERE f.id = ?
+            """,
+            (fact_id,),
+        )
+        if not fact:
+            return {"ok": False, "status": "not_found", "message": f"Fact {fact_id} not found."}
+        facts.append(dict(fact))
+
+    entity = db.row("SELECT type FROM entities WHERE id = ?", (review["entity_id"],))
+    entity_type = entity["type"] if entity else "unknown"
+
+    if resolver is None:
+        from .llm import resolve_conflict as resolver
+
+    def fact_date(fact: dict[str, Any]) -> str:
+        raw = {}
+        try:
+            raw = json.loads(fact.get("raw_json") or "{}")
+        except (json.JSONDecodeError, TypeError):
+            pass
+        for key in ("date", "Date", "assigned_date", "review_date", "created_date", "interaction_date"):
+            value = raw.get(key)
+            if value:
+                return str(value)
+        return fact.get("observed_at") or ""
+
+    result = resolver(
+        entity_id=review["entity_id"],
+        entity_type=entity_type,
+        predicate=review["predicate"],
+        value_a=facts[0].get("value", ""),
+        source_a=f"{facts[0]['dataset_path']}#{facts[0]['record_id']}",
+        confidence_a=facts[0].get("confidence", 0.0),
+        date_a=fact_date(facts[0]),
+        value_b=facts[1].get("value", ""),
+        source_b=f"{facts[1]['dataset_path']}#{facts[1]['record_id']}",
+        confidence_b=facts[1].get("confidence", 0.0),
+        date_b=fact_date(facts[1]),
+    )
+
+    if (
+        result.get("resolution") != "auto_resolve"
+        or result.get("winner") not in {"A", "B"}
+        or float(result.get("confidence", 0.0)) < 0.75
+    ):
+        return {
+            "ok": False,
+            "status": "needs_human_review",
+            "llm_result": result,
+            "message": result.get("human_summary") or result.get("reason") or "LLM requested human review.",
+        }
+
+    winner_index = 0 if result["winner"] == "A" else 1
+    choice_id = candidates[winner_index]["choice_id"]
+    if not db.resolve_review(review_id, choice_id):
+        return {"ok": False, "status": "not_found", "message": "Review or choice not found."}
+    return {
+        "ok": True,
+        "status": "resolved",
+        "choice": choice_id,
+        "llm_result": result,
+    }
 
 
 def create_app(db_path: Path, out_dir: Path):
@@ -55,7 +147,7 @@ def create_app(db_path: Path, out_dir: Path):
 
     @app.get("/", response_class=HTMLResponse)
     def index():
-        return HTMLResponse(CONTEXT_BROWSER_HTML)
+        return HTMLResponse(STATUS_PAGE_HTML)
 
     @app.get("/health")
     def health():
@@ -182,6 +274,20 @@ def create_app(db_path: Path, out_dir: Path):
                 raise HTTPException(status_code=404, detail="Review or choice not found")
             files_generated = refresh_review(db, review_id)
             return {"ok": True, "files_generated": files_generated}
+        finally:
+            db.close()
+
+    @app.post("/reviews/{review_id:path}/auto-resolve")
+    def auto_resolve(review_id: str):
+        db = store()
+        try:
+            result = auto_resolve_review_with_llm(db, review_id)
+            if result["status"] == "not_found":
+                raise HTTPException(status_code=404, detail=result["message"])
+            if not result["ok"]:
+                return result
+            files_generated = refresh_review(db, review_id)
+            return {**result, "files_generated": files_generated}
         finally:
             db.close()
 
@@ -315,952 +421,109 @@ def create_app(db_path: Path, out_dir: Path):
     return app
 
 
-CONTEXT_BROWSER_HTML = r"""
-<!doctype html>
+STATUS_PAGE_HTML = """<!doctype html>
 <html lang="en">
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Context Base Browser</title>
+  <title>Qontext API — Context Base</title>
   <style>
     :root {
-      color-scheme: light;
-      --bg: #f7f8fa;
-      --panel: #ffffff;
-      --ink: #171a1f;
-      --muted: #667085;
-      --line: #d9dee7;
-      --line-soft: #edf0f5;
-      --accent: #0f766e;
+      --bg: #f7f8fa; --panel: #fff; --ink: #171a1f; --muted: #667085;
+      --line: #e4e7ec; --accent: #0d9488; --accent-dark: #0f766e;
       --accent-soft: #e6f4f1;
-      --danger: #b42318;
-      --shadow: 0 1px 2px rgba(16, 24, 40, 0.08);
-      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      font-family: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
     }
-    * { box-sizing: border-box; }
-    body {
-      margin: 0;
-      min-height: 100vh;
-      background: var(--bg);
-      color: var(--ink);
-    }
-    button, input {
-      font: inherit;
-    }
-    .app {
-      display: grid;
-      grid-template-columns: 320px minmax(420px, 1fr) 360px;
-      min-height: 100vh;
-    }
-    .sidebar, .inspector {
-      background: var(--panel);
-      border-color: var(--line);
-      min-width: 0;
-    }
-    .sidebar {
-      border-right: 1px solid var(--line);
-      display: flex;
-      flex-direction: column;
-    }
-    .inspector {
-      border-left: 1px solid var(--line);
-      overflow: auto;
-    }
-    .brand {
-      padding: 18px 18px 14px;
-      border-bottom: 1px solid var(--line-soft);
-    }
-    .brand h1 {
-      margin: 0;
-      font-size: 18px;
-      line-height: 1.2;
-      letter-spacing: 0;
-    }
-    .brand p {
-      margin: 7px 0 0;
-      color: var(--muted);
-      font-size: 13px;
-      line-height: 1.4;
-    }
-    .search-box {
-      padding: 14px;
-      border-bottom: 1px solid var(--line-soft);
-    }
-    .search-row {
-      display: flex;
-      gap: 8px;
-    }
-    input {
-      width: 100%;
-      min-width: 0;
-      height: 36px;
-      border: 1px solid var(--line);
-      border-radius: 6px;
-      padding: 0 10px;
-      background: #fff;
-      color: var(--ink);
-    }
-    button {
-      height: 36px;
-      border: 1px solid var(--line);
-      border-radius: 6px;
-      background: #fff;
-      color: var(--ink);
-      padding: 0 10px;
-      cursor: pointer;
-    }
-    button.primary {
-      background: var(--accent);
-      border-color: var(--accent);
-      color: #fff;
-    }
-    button:hover {
-      border-color: var(--accent);
-    }
-    .nav-tabs {
-      display: grid;
-      grid-template-columns: 1fr 1fr;
-      padding: 10px 14px 0;
-      gap: 8px;
-    }
-    .nav-tabs button {
-      height: 32px;
-      font-size: 13px;
-    }
-    .nav-tabs button.active {
-      background: var(--accent-soft);
-      border-color: var(--accent);
-      color: var(--accent);
-    }
-    .list {
-      overflow: auto;
-      padding: 10px 8px 18px;
-      flex: 1;
-    }
-    .item {
-      width: 100%;
-      min-height: 34px;
-      height: auto;
-      border: 0;
-      border-radius: 6px;
-      background: transparent;
-      text-align: left;
-      padding: 8px 10px;
-      display: block;
-      color: var(--ink);
-    }
-    .item:hover, .item.active {
-      background: var(--accent-soft);
-    }
-    .item .path {
-      font-size: 12px;
-      color: var(--muted);
-      overflow-wrap: anywhere;
-    }
-    .item .title {
-      font-size: 13px;
-      font-weight: 650;
-      line-height: 1.3;
-      overflow-wrap: anywhere;
-    }
-    .content {
-      display: flex;
-      flex-direction: column;
-      min-width: 0;
-      overflow: hidden;
-    }
-    .toolbar {
-      height: 56px;
-      background: var(--panel);
-      border-bottom: 1px solid var(--line);
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      padding: 0 18px;
-      gap: 12px;
-    }
-    .current-path {
-      font-size: 13px;
-      color: var(--muted);
-      overflow: hidden;
-      text-overflow: ellipsis;
-      white-space: nowrap;
-    }
-    .toolbar-actions {
-      display: flex;
-      gap: 8px;
-      flex: 0 0 auto;
-    }
-    .document {
-      overflow: auto;
-      padding: 24px;
-    }
-    .doc-card {
-      background: var(--panel);
-      border: 1px solid var(--line);
-      border-radius: 8px;
-      box-shadow: var(--shadow);
-      max-width: 1040px;
-      margin: 0 auto;
-      padding: 28px;
-    }
-    .empty {
-      color: var(--muted);
-      text-align: center;
-      padding: 72px 24px;
-    }
-    .md h1 { font-size: 28px; margin: 0 0 20px; letter-spacing: 0; }
-    .md h2 { font-size: 17px; margin: 28px 0 12px; letter-spacing: 0; }
-    .md p, .md li { line-height: 1.55; }
-    .md code {
-      background: #f2f4f7;
-      border: 1px solid var(--line-soft);
-      border-radius: 4px;
-      padding: 1px 4px;
-      font-size: 12px;
-    }
-    .md pre {
-      white-space: pre-wrap;
-      overflow-wrap: anywhere;
-      background: #101828;
-      color: #f8fafc;
-      border-radius: 8px;
-      padding: 14px;
-      overflow: auto;
-    }
-    .md table {
-      width: 100%;
-      border-collapse: collapse;
-      font-size: 13px;
-      table-layout: fixed;
-    }
-    .md th, .md td {
-      border: 1px solid var(--line);
-      padding: 8px;
-      vertical-align: top;
-      overflow-wrap: anywhere;
-    }
-    .md th {
-      background: #f8fafc;
-      text-align: left;
-    }
-    .raw {
-      white-space: pre-wrap;
-      overflow-wrap: anywhere;
-      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-      font-size: 12px;
-      line-height: 1.5;
-      display: none;
-    }
-    .inspector-section {
-      padding: 18px;
-      border-bottom: 1px solid var(--line-soft);
-    }
-    .inspector-section h2 {
-      margin: 0 0 12px;
-      font-size: 14px;
-      letter-spacing: 0;
-    }
-    .kv {
-      display: grid;
-      grid-template-columns: 92px minmax(0, 1fr);
-      gap: 7px 10px;
-      font-size: 13px;
-    }
-    .kv .key { color: var(--muted); }
-    .kv .value { overflow-wrap: anywhere; }
-    .fact {
-      border: 1px solid var(--line-soft);
-      border-radius: 6px;
-      padding: 9px;
-      margin: 8px 0;
-      background: #fff;
-    }
-    .fact button {
-      margin-top: 8px;
-      height: 28px;
-      font-size: 12px;
-    }
-    .muted {
-      color: var(--muted);
-      font-size: 13px;
-      line-height: 1.4;
-    }
-    .badge {
-      display: inline-flex;
-      align-items: center;
-      min-height: 22px;
-      border-radius: 999px;
-      padding: 2px 8px;
-      background: var(--accent-soft);
-      color: var(--accent);
-      font-size: 12px;
-      font-weight: 650;
-    }
-    .graph {
-      display: flex;
-      flex-wrap: wrap;
-      gap: 8px;
-    }
-    .node {
-      height: auto;
-      min-height: 30px;
-      max-width: 100%;
-      text-align: left;
-      background: #fff;
-      font-size: 12px;
-    }
-    .source-panel {
-      display: none;
-      position: fixed;
-      inset: auto 24px 24px auto;
-      width: min(620px, calc(100vw - 48px));
-      max-height: min(620px, calc(100vh - 48px));
-      overflow: auto;
-      background: #fff;
-      border: 1px solid var(--line);
-      border-radius: 8px;
-      box-shadow: 0 18px 48px rgba(16, 24, 40, 0.22);
-      padding: 16px;
-      z-index: 10;
-    }
-    .source-panel.open { display: block; }
-    .source-panel header {
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      gap: 12px;
-      margin-bottom: 10px;
-    }
-    .source-panel h2 {
-      margin: 0;
-      font-size: 15px;
-    }
-    .source-panel pre {
-      white-space: pre-wrap;
-      overflow-wrap: anywhere;
-      font-size: 12px;
-      line-height: 1.45;
-      background: #f8fafc;
-      border: 1px solid var(--line-soft);
-      border-radius: 8px;
-      padding: 12px;
-    }
-    @media (max-width: 1100px) {
-      .app {
-        grid-template-columns: 280px minmax(0, 1fr);
-      }
-      .inspector {
-        grid-column: 1 / -1;
-        border-left: 0;
-        border-top: 1px solid var(--line);
-        max-height: 45vh;
-      }
-    }
-    @media (max-width: 760px) {
-      .app {
-        grid-template-columns: 1fr;
-      }
-      .sidebar {
-        max-height: 42vh;
-        border-right: 0;
-        border-bottom: 1px solid var(--line);
-      }
-      .toolbar {
-        align-items: stretch;
-        height: auto;
-        padding: 12px;
-        flex-direction: column;
-      }
-      .toolbar-actions {
-        width: 100%;
-      }
-      .toolbar-actions button {
-        flex: 1;
-      }
-      .document {
-        padding: 12px;
-      }
-      .doc-card {
-        padding: 18px;
-      }
-    }
-    .modal-overlay {
-      position: fixed;
-      inset: 0;
-      background: rgba(16,24,40,0.4);
-      z-index: 20;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-    }
-    .modal {
-      background: var(--panel);
-      border-radius: 8px;
-      padding: 20px;
-      width: min(480px, calc(100vw - 48px));
-      box-shadow: 0 18px 48px rgba(16,24,40,0.22);
-    }
-    .modal h3 { margin: 0 0 14px; font-size: 16px; }
-    .modal .field { margin-bottom: 10px; }
-    .modal .field label { display: block; font-size: 12px; color: var(--muted); margin-bottom: 4px; }
-    .modal .field input, .modal .field textarea, .modal .field select { width: 100%; }
-    .modal .actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 16px; }
-    .btn-sm { height: 26px; font-size: 11px; padding: 0 7px; border-radius: 4px; }
-    .btn-danger { color: var(--danger); border-color: var(--danger); }
-    .btn-danger:hover { background: #fef2f2; }
-    .add-btn { display: block; width: 100%; margin-top: 8px; font-size: 12px; color: var(--accent); border-style: dashed; }
-  
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { background: var(--bg); color: var(--ink); min-height: 100vh; display: flex; align-items: center; justify-content: center; padding: 24px; }
+    .card { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; box-shadow: 0 4px 24px rgba(16,24,40,.07); max-width: 560px; width: 100%; padding: 36px 40px; }
+    .logo { display: flex; align-items: center; gap: 10px; margin-bottom: 24px; }
+    .logo-hex { width: 36px; height: 36px; background: var(--accent-soft); border-radius: 8px; display: flex; align-items: center; justify-content: center; }
+    .logo-hex svg { color: var(--accent-dark); }
+    .logo-name { font-size: 20px; font-weight: 700; color: var(--accent-dark); }
+    .logo-sub { font-size: 13px; color: var(--muted); margin-left: 2px; }
+    h2 { font-size: 15px; font-weight: 600; margin-bottom: 12px; color: var(--ink); }
+    .cta { display: block; background: var(--accent); color: #fff; text-decoration: none; font-weight: 600; font-size: 15px; text-align: center; padding: 13px 20px; border-radius: 8px; margin-bottom: 24px; transition: background .15s; }
+    .cta:hover { background: var(--accent-dark); }
+    .stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin-bottom: 24px; }
+    .stat { background: var(--bg); border: 1px solid var(--line); border-radius: 8px; padding: 12px; text-align: center; }
+    .stat-val { font-size: 22px; font-weight: 700; color: var(--accent-dark); }
+    .stat-label { font-size: 11px; color: var(--muted); margin-top: 2px; text-transform: uppercase; letter-spacing: .04em; }
+    .endpoints { border-top: 1px solid var(--line); padding-top: 20px; }
+    .endpoint { display: flex; gap: 10px; align-items: baseline; padding: 5px 0; font-size: 13px; border-bottom: 1px solid var(--line); }
+    .endpoint:last-child { border-bottom: none; }
+    .method { font-family: monospace; font-size: 11px; font-weight: 700; background: var(--accent-soft); color: var(--accent-dark); border-radius: 4px; padding: 2px 6px; white-space: nowrap; }
+    .method.post { background: #fef3c7; color: #92400e; }
+    .method.patch { background: #ede9fe; color: #6d28d9; }
+    .method.delete { background: #fee2e2; color: #b91c1c; }
+    .path { font-family: monospace; font-size: 12px; color: var(--ink); }
+    .desc { font-size: 12px; color: var(--muted); margin-left: auto; }
+    .badge-ok { display: inline-block; background: #dcfce7; color: #15803d; font-size: 11px; font-weight: 700; border-radius: 999px; padding: 2px 10px; margin-left: 8px; }
   </style>
 </head>
 <body>
-  <main class="app">
-    <aside class="sidebar">
-      <section class="brand">
-        <h1>Context Base</h1>
-        <p>Inspect the generated virtual file system, graph links, facts, and provenance.</p>
-      </section>
-      <section class="search-box">
-        <div class="search-row">
-          <input id="searchInput" placeholder="Search context..." />
-          <button id="searchButton" class="primary">Search</button>
-        </div>
-      </section>
-      <nav class="nav-tabs">
-        <button id="treeTab" class="active">Files</button>
-        <button id="searchTab">Results</button>
-      </nav>
-      <section id="treeList" class="list"></section>
-      <section id="searchList" class="list" style="display:none"></section>
-    </aside>
-
-    <section class="content">
-      <header class="toolbar">
-        <div id="currentPath" class="current-path">No file selected</div>
-        <div class="toolbar-actions">
-          <button id="previewButton" class="active">Preview</button>
-          <button id="rawButton">Raw</button>
-          <button id="refreshButton">Refresh</button>
-        </div>
-      </header>
-      <section class="document">
-        <article class="doc-card">
-          <div id="emptyState" class="empty">Choose a file or run a search to inspect company context.</div>
-          <div id="markdownView" class="md"></div>
-          <pre id="rawView" class="raw"></pre>
-        </article>
-      </section>
-    </section>
-
-    <aside class="inspector">
-      <section class="inspector-section" style="display:flex;justify-content:space-between;align-items:center">
-        <h2 style="margin:0">Entity</h2>
-        <button id="newEntityBtn" class="btn-sm primary" style="display:none">+ New Entity</button>
-      </section>
-      <section class="inspector-section">
-        <div id="entityDetails" class="muted">No entity selected.</div>
-      </section>
-      <section class="inspector-section">
-        <h2>Graph Neighbors</h2>
-        <div id="graphView" class="graph muted">No graph loaded.</div>
-      </section>
-      <section class="inspector-section">
-        <div style="display:flex;justify-content:space-between;align-items:center">
-          <h2 style="margin:0">Facts</h2>
-          <button id="addFactBtn" class="btn-sm primary" style="display:none">+ Add Fact</button>
-        </div>
-        <div id="factsView" class="muted" style="margin-top:10px">No facts loaded.</div>
-      </section>
-      <section class="inspector-section">
-        <div style="display:flex;justify-content:space-between;align-items:center">
-          <h2 style="margin:0">Open Reviews</h2>
-          <button id="reloadReviewsBtn" class="btn-sm">Reload</button>
-        </div>
-        <div id="reviewsView" class="muted" style="margin-top:10px">No reviews loaded.</div>
-      </section>
-    </aside>
-  </main>
-
-  <section id="sourcePanel" class="source-panel">
-    <header>
-      <h2>Source Record</h2>
-      <button id="closeSource">Close</button>
-    </header>
-    <pre id="sourceContent"></pre>
-  </section>
-
-  <div id="modalOverlay" class="modal-overlay" style="display:none">
-    <div class="modal">
-      <h3 id="modalTitle">Edit</h3>
-      <div id="modalBody"></div>
-      <div class="actions">
-        <button id="modalCancel">Cancel</button>
-        <button id="modalSave" class="primary">Save</button>
+  <div class="card">
+    <div class="logo">
+      <div class="logo-hex">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <polygon points="12 2 22 8.5 22 15.5 12 22 2 15.5 2 8.5"/>
+        </svg>
       </div>
+      <div>
+        <div class="logo-name">Qontext <span class="logo-sub">API</span></div>
+      </div>
+      <span class="badge-ok" id="health-badge">checking…</span>
+    </div>
+
+    <a class="cta" href="http://localhost:5173" target="_blank">
+      Open React Dashboard → localhost:5173
+    </a>
+
+    <h2>Graph Stats</h2>
+    <div class="stats" id="stats-grid">
+      <div class="stat"><div class="stat-val">—</div><div class="stat-label">Entities</div></div>
+      <div class="stat"><div class="stat-val">—</div><div class="stat-label">Facts</div></div>
+      <div class="stat"><div class="stat-val">—</div><div class="stat-label">Edges</div></div>
+      <div class="stat"><div class="stat-val">—</div><div class="stat-label">Sources</div></div>
+      <div class="stat"><div class="stat-val">—</div><div class="stat-label">Open Reviews</div></div>
+    </div>
+
+    <div class="endpoints">
+      <h2 style="margin-bottom:12px">API Endpoints</h2>
+      <div class="endpoint"><span class="method">GET</span><span class="path">/stats</span><span class="desc">Graph counts</span></div>
+      <div class="endpoint"><span class="method">GET</span><span class="path">/search?q=…</span><span class="desc">Hybrid search</span></div>
+      <div class="endpoint"><span class="method">GET</span><span class="path">/entities/{id}</span><span class="desc">Entity + facts</span></div>
+      <div class="endpoint"><span class="method">GET</span><span class="path">/entities/{id}/neighbors</span><span class="desc">Graph edges</span></div>
+      <div class="endpoint"><span class="method">GET</span><span class="path">/vfs/tree</span><span class="desc">VFS file list</span></div>
+      <div class="endpoint"><span class="method">GET</span><span class="path">/vfs/file?path=…</span><span class="desc">Read VFS file</span></div>
+      <div class="endpoint"><span class="method">GET</span><span class="path">/facts/{id}/sources</span><span class="desc">Raw provenance</span></div>
+      <div class="endpoint"><span class="method">GET</span><span class="path">/reviews</span><span class="desc">Open conflicts</span></div>
+      <div class="endpoint"><span class="method post">POST</span><span class="path">/reviews/{id}/resolve</span><span class="desc">Resolve conflict</span></div>
+      <div class="endpoint"><span class="method post">POST</span><span class="path">/entities</span><span class="desc">Create entity</span></div>
+      <div class="endpoint"><span class="method post">POST</span><span class="path">/entities/{id}/facts</span><span class="desc">Add fact</span></div>
+      <div class="endpoint"><span class="method patch">PATCH</span><span class="path">/facts/{id}</span><span class="desc">Edit fact</span></div>
+      <div class="endpoint"><span class="method delete">DELETE</span><span class="path">/facts/{id}</span><span class="desc">Delete fact</span></div>
+      <div class="endpoint"><span class="method delete">DELETE</span><span class="path">/entities/{id}</span><span class="desc">Delete entity</span></div>
+      <div class="endpoint"><span class="method post">POST</span><span class="path">/vfs/refresh</span><span class="desc">Regenerate VFS</span></div>
     </div>
   </div>
 
   <script>
-    const state = {
-      files: [],
-      selectedPath: null,
-      selectedEntityId: null,
-      currentFacts: [],
-      currentReviews: [],
-      modalSubmit: null,
-      rawMarkdown: "",
-      mode: "preview"
-    };
-
-    const byId = (id) => document.getElementById(id);
-
-    async function api(path, options) {
-      const response = await fetch(path, options);
-      if (!response.ok) {
-        const text = await response.text();
-        throw new Error(`${response.status} ${text}`);
-      }
-      return response.json();
-    }
-
-    async function refreshVfsAndSelection(path = state.selectedPath) {
-      await api("/vfs/refresh", { method: "POST" });
-      await loadTree();
-      if (path) {
-        await openFile(path);
-      }
-    }
-
-    function escapeHtml(value) {
-      return String(value ?? "")
-        .replaceAll("&", "&amp;")
-        .replaceAll("<", "&lt;")
-        .replaceAll(">", "&gt;")
-        .replaceAll('"', "&quot;")
-        .replaceAll("'", "&#39;");
-    }
-
-    function inlineMarkdown(value) {
-      return escapeHtml(value)
-        .replace(/`\[\[([^|\]]+)\|([^\]]+)\]\]`/g, "<code>[[$1|$2]]</code>")
-        .replace(/\[\[([^|\]]+)\|([^\]]+)\]\]/g, "<button class=\"node\" data-path=\"$1\">$2</button>")
-        .replace(/\[\[([^\]]+)\]\]/g, "<button class=\"node\" data-path=\"$1\">$1</button>")
-        .replace(/`([^`]+)`/g, "<code>$1</code>");
-    }
-
-    function renderMarkdown(markdown) {
-      const body = markdown.replace(/^---[\s\S]*?---\s*/, "");
-      const lines = body.split("\n");
-      const html = [];
-      let inList = false;
-      let index = 0;
-
-      function closeList() {
-        if (inList) {
-          html.push("</ul>");
-          inList = false;
-        }
-      }
-
-      while (index < lines.length) {
-        const line = lines[index];
-        if (!line.trim()) {
-          closeList();
-          index += 1;
-          continue;
-        }
-        if (line.startsWith("# ")) {
-          closeList();
-          html.push(`<h1>${inlineMarkdown(line.slice(2))}</h1>`);
-          index += 1;
-          continue;
-        }
-        if (line.startsWith("## ")) {
-          closeList();
-          html.push(`<h2>${inlineMarkdown(line.slice(3))}</h2>`);
-          index += 1;
-          continue;
-        }
-        if (line.startsWith("|") && lines[index + 1]?.startsWith("|---")) {
-          closeList();
-          const headers = line.split("|").slice(1, -1).map(cell => cell.trim());
-          index += 2;
-          const rows = [];
-          while (lines[index]?.startsWith("|")) {
-            rows.push(lines[index].split("|").slice(1, -1).map(cell => cell.trim()));
-            index += 1;
-          }
-          html.push("<table><thead><tr>" + headers.map(h => `<th>${inlineMarkdown(h)}</th>`).join("") + "</tr></thead><tbody>");
-          for (const row of rows) {
-            html.push("<tr>" + row.map(cell => `<td>${inlineMarkdown(cell)}</td>`).join("") + "</tr>");
-          }
-          html.push("</tbody></table>");
-          continue;
-        }
-        if (line.startsWith("- ")) {
-          if (!inList) {
-            html.push("<ul>");
-            inList = true;
-          }
-          html.push(`<li>${inlineMarkdown(line.slice(2))}</li>`);
-          index += 1;
-          continue;
-        }
-        closeList();
-        html.push(`<p>${inlineMarkdown(line)}</p>`);
-        index += 1;
-      }
-      closeList();
-      return html.join("");
-    }
-
-    function entityIdFromMarkdown(markdown) {
-      const match = markdown.match(/^id:\s*(.+)$/m);
-      return match ? match[1].trim() : null;
-    }
-
-    function setMode(mode) {
-      state.mode = mode;
-      byId("markdownView").style.display = mode === "preview" ? "block" : "none";
-      byId("rawView").style.display = mode === "raw" ? "block" : "none";
-      byId("previewButton").classList.toggle("active", mode === "preview");
-      byId("rawButton").classList.toggle("active", mode === "raw");
-    }
-
-    function selectTab(tab) {
-      byId("treeList").style.display = tab === "tree" ? "block" : "none";
-      byId("searchList").style.display = tab === "search" ? "block" : "none";
-      byId("treeTab").classList.toggle("active", tab === "tree");
-      byId("searchTab").classList.toggle("active", tab === "search");
-    }
-
-    function renderTree(filter = "") {
-      const list = byId("treeList");
-      const needle = filter.trim().toLowerCase();
-      const files = state.files.filter(path => !needle || path.toLowerCase().includes(needle)).slice(0, 600);
-      list.innerHTML = files.map(path => `
-        <button class="item ${path === state.selectedPath ? "active" : ""}" data-path="${escapeHtml(path)}">
-          <div class="title">${escapeHtml(path.split("/").pop())}</div>
-          <div class="path">${escapeHtml(path)}</div>
-        </button>
-      `).join("") || "<div class=\"empty\">No files found.</div>";
-    }
-
-    async function loadTree() {
-      const payload = await api("/vfs/tree");
-      state.files = payload.files || [];
-      renderTree();
-      byId("newEntityBtn").style.display = "inline-flex";
-      await loadReviews();
-    }
-
-    async function openFile(path) {
-      const payload = await api(`/vfs/file?path=${encodeURIComponent(path)}`);
-      state.selectedPath = path;
-      state.rawMarkdown = payload.content;
-      state.selectedEntityId = entityIdFromMarkdown(payload.content);
-      byId("currentPath").textContent = path;
-      byId("emptyState").style.display = "none";
-      byId("markdownView").innerHTML = renderMarkdown(payload.content);
-      byId("rawView").textContent = payload.content;
-      renderTree(byId("searchInput").value);
-      setMode(state.mode);
-      if (state.selectedEntityId) {
-        await loadEntity(state.selectedEntityId);
-      }
-    }
-
-    async function loadEntity(entityId) {
-      const payload = await api(`/entities/${encodeURIComponent(entityId)}`);
-      const entity = payload.entity;
-      state.selectedEntityId = entity.id;
-      byId("entityDetails").innerHTML = `
-        <div class="kv">
-          <div class="key">ID</div><div class="value"><code>${escapeHtml(entity.id)}</code></div>
-          <div class="key">Type</div><div class="value"><span class="badge">${escapeHtml(entity.type)}</span></div>
-          <div class="key">Name</div><div class="value">${escapeHtml(entity.name)}</div>
-          <div class="key">Path</div><div class="value">${escapeHtml(entity.path || "none")}</div>
-        </div>
-      `;
-      byId("addFactBtn").style.display = "inline-flex";
-      renderFacts(payload.facts || []);
-      const graphPayload = await api(`/entities/${encodeURIComponent(entityId)}/neighbors`);
-      renderGraph(graphPayload.neighbors || []);
-    }
-
-    function renderGraph(neighbors) {
-      const target = byId("graphView");
-      if (!neighbors.length) {
-        target.innerHTML = "No graph neighbors.";
-        return;
-      }
-      target.classList.remove("muted");
-      target.innerHTML = neighbors.map(item => `
-        <button class="node" title="${escapeHtml(item.relation)}" data-path="${escapeHtml(item.path || "")}" data-entity="${escapeHtml(item.entity_id)}">
-          ${escapeHtml(item.direction)} · ${escapeHtml(item.relation)}<br>
-          <strong>${escapeHtml(item.name)}</strong>
-        </button>
-      `).join("");
-    }
-
-    function renderFacts(facts) {
-      state.currentFacts = facts;
-      const target = byId("factsView");
-      if (!facts.length) {
-        target.innerHTML = "<div class=\"muted\">No facts.</div>";
-        return;
-      }
-      target.classList.remove("muted");
-      target.innerHTML = facts.slice(0, 80).map(fact => `
-        <div class="fact">
-          <div><strong>${escapeHtml(fact.predicate)}</strong></div>
-          <div class="muted">${escapeHtml(fact.value || fact.object_entity_id || "")}</div>
-          <button class="btn-sm" data-fact="${escapeHtml(fact.id)}">Source</button>
-          <button class="btn-sm" data-action="edit-fact" data-fact="${escapeHtml(fact.id)}">Edit</button>
-          <button class="btn-sm btn-danger" data-action="delete-fact" data-fact="${escapeHtml(fact.id)}">Delete</button>
-        </div>
-      `).join("");
-    }
-
-    function openModal(title, bodyHtml, onSubmit) {
-      byId("modalTitle").textContent = title;
-      byId("modalBody").innerHTML = bodyHtml;
-      state.modalSubmit = onSubmit;
-      byId("modalOverlay").style.display = "flex";
-    }
-
-    function closeModal() {
-      byId("modalOverlay").style.display = "none";
-      byId("modalBody").innerHTML = "";
-      state.modalSubmit = null;
-    }
-
-    function inputValue(id) {
-      return byId(id)?.value?.trim() || "";
-    }
-
-    function numberValue(id, fallback = 1) {
-      const raw = inputValue(id);
-      if (!raw) return fallback;
-      const parsed = Number(raw);
-      return Number.isFinite(parsed) ? parsed : fallback;
-    }
-
-    function openNewEntityModal() {
-      openModal("New Entity", `
-        <div class="field"><label>Entity ID</label><input id="newEntityId" placeholder="project:acme-renewal-2026" /></div>
-        <div class="field"><label>Type</label><input id="newEntityType" placeholder="project" /></div>
-        <div class="field"><label>Name</label><input id="newEntityName" placeholder="ACME renewal 2026" /></div>
-        <div class="field"><label>Path</label><input id="newEntityPath" placeholder="company/projects/acme-renewal-2026.md" /></div>
-        <div class="field"><label>Summary</label><textarea id="newEntitySummary" rows="3"></textarea></div>
-      `, async () => {
-        const entityId = inputValue("newEntityId");
-        const entityType = inputValue("newEntityType");
-        const name = inputValue("newEntityName");
-        if (!entityId || !entityType || !name) {
-          throw new Error("Entity ID, type, and name are required.");
-        }
-        const payload = {
-          entity_id: entityId,
-          entity_type: entityType,
-          name,
-          path: inputValue("newEntityPath") || null,
-          summary: inputValue("newEntitySummary") || null
-        };
-        const created = await api("/entities", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(payload)
-        });
-        closeModal();
-        await refreshVfsAndSelection(created.path);
+    fetch('/health').then(r => r.json()).then(() => {
+      document.getElementById('health-badge').textContent = 'API running';
+      document.getElementById('health-badge').style.background = '#dcfce7';
+      document.getElementById('health-badge').style.color = '#15803d';
+    }).catch(() => {
+      document.getElementById('health-badge').textContent = 'offline';
+      document.getElementById('health-badge').style.background = '#fee2e2';
+      document.getElementById('health-badge').style.color = '#b91c1c';
+    });
+    fetch('/stats').then(r => r.json()).then(d => {
+      const vals = [d.entities, d.facts, d.edges, d.sources, d.open_reviews];
+      document.querySelectorAll('#stats-grid .stat-val').forEach((el, i) => {
+        el.textContent = (vals[i] ?? 0).toLocaleString();
       });
-    }
-
-    function openAddFactModal() {
-      if (!state.selectedEntityId) return;
-      openModal("Add Fact", `
-        <div class="field"><label>Predicate</label><input id="factPredicate" placeholder="status" /></div>
-        <div class="field"><label>Value</label><textarea id="factValue" rows="3"></textarea></div>
-        <div class="field"><label>Target Entity ID</label><input id="factTarget" placeholder="employee:emp_0431" /></div>
-        <div class="field"><label>Confidence</label><input id="factConfidence" value="1.0" /></div>
-      `, async () => {
-        const predicate = inputValue("factPredicate");
-        if (!predicate) {
-          throw new Error("Predicate is required.");
-        }
-        await api(`/entities/${encodeURIComponent(state.selectedEntityId)}/facts`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            predicate,
-            value: inputValue("factValue") || null,
-            object_entity_id: inputValue("factTarget") || null,
-            confidence: numberValue("factConfidence", 1)
-          })
-        });
-        closeModal();
-        await refreshVfsAndSelection();
-      });
-    }
-
-    function openEditFactModal(factId) {
-      const fact = state.currentFacts.find(item => item.id === factId);
-      if (!fact) return;
-      openModal("Edit Fact", `
-        <div class="field"><label>Predicate</label><input value="${escapeHtml(fact.predicate)}" disabled /></div>
-        <div class="field"><label>Value</label><textarea id="editFactValue" rows="4">${escapeHtml(fact.value || "")}</textarea></div>
-        <div class="field"><label>Confidence</label><input id="editFactConfidence" value="${escapeHtml(fact.confidence ?? 1)}" /></div>
-      `, async () => {
-        await api(`/facts/${encodeURIComponent(factId)}`, {
-          method: "PATCH",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            value: inputValue("editFactValue"),
-            confidence: numberValue("editFactConfidence", fact.confidence ?? 1)
-          })
-        });
-        closeModal();
-        await refreshVfsAndSelection();
-      });
-    }
-
-    async function deleteFact(factId) {
-      if (!confirm("Delete this fact from the context base?")) return;
-      await api(`/facts/${encodeURIComponent(factId)}`, { method: "DELETE" });
-      await refreshVfsAndSelection();
-    }
-
-    async function loadReviews() {
-      const payload = await api("/reviews");
-      state.currentReviews = (payload.reviews || []).filter(item => item.status === "open");
-      renderReviews();
-    }
-
-    function renderReviews() {
-      const target = byId("reviewsView");
-      if (!state.currentReviews.length) {
-        target.innerHTML = "<div class=\"muted\">No open reviews.</div>";
-        return;
-      }
-      target.innerHTML = state.currentReviews.slice(0, 12).map(review => {
-        let choices = [];
-        try { choices = JSON.parse(review.candidates_json || "[]"); } catch (_) {}
-        return `
-          <div class="fact">
-            <div><strong>${escapeHtml(review.predicate)}</strong></div>
-            <div class="muted">${escapeHtml(review.entity_id)} · ${escapeHtml(review.conflict_type)}</div>
-            ${choices.map(choice => `
-              <button class="btn-sm" data-action="resolve-review" data-review="${escapeHtml(review.id)}" data-choice="${escapeHtml(choice.choice_id)}">
-                ${escapeHtml(choice.choice_id)}
-              </button>
-            `).join("")}
-          </div>
-        `;
-      }).join("");
-    }
-
-    async function resolveReview(reviewId, choice) {
-      await api(`/reviews/${encodeURIComponent(reviewId)}/resolve`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ choice })
-      });
-      await refreshVfsAndSelection();
-      await loadReviews();
-    }
-
-    async function runSearch() {
-      const query = byId("searchInput").value.trim();
-      if (!query) {
-        renderTree();
-        selectTab("tree");
-        return;
-      }
-      const payload = await api(`/search?q=${encodeURIComponent(query)}`);
-      const results = payload.results || [];
-      byId("searchList").innerHTML = results.map(item => `
-        <button class="item" data-path="${escapeHtml(item.path || "")}" data-entity="${escapeHtml(item.entity_id || "")}">
-          <div class="title">${escapeHtml(item.name || item.path || item.kind)}</div>
-          <div class="path">${escapeHtml(item.kind)} ${item.type ? "· " + escapeHtml(item.type) : ""}</div>
-          <div class="path">${escapeHtml(item.snippet || "")}</div>
-        </button>
-      `).join("") || "<div class=\"empty\">No search results.</div>";
-      selectTab("search");
-    }
-
-    async function showSource(factId) {
-      const payload = await api(`/facts/${encodeURIComponent(factId)}/sources`);
-      byId("sourceContent").textContent = JSON.stringify(payload.fact, null, 2);
-      byId("sourcePanel").classList.add("open");
-    }
-
-    document.addEventListener("click", async (event) => {
-      const actionButton = event.target.closest("[data-action]");
-      if (actionButton) {
-        const action = actionButton.dataset.action;
-        const factId = actionButton.dataset.fact;
-        if (action === "edit-fact" && factId) openEditFactModal(factId);
-        if (action === "delete-fact" && factId) await deleteFact(factId);
-        if (action === "resolve-review") await resolveReview(actionButton.dataset.review, actionButton.dataset.choice);
-        return;
-      }
-      const pathButton = event.target.closest("[data-path]");
-      if (pathButton) {
-        const path = pathButton.dataset.path;
-        if (path) {
-          await openFile(path);
-          return;
-        }
-      }
-      const entityButton = event.target.closest("[data-entity]");
-      if (entityButton && entityButton.dataset.entity) {
-        await loadEntity(entityButton.dataset.entity);
-        return;
-      }
-      const factButton = event.target.closest("[data-fact]");
-      if (factButton) {
-        await showSource(factButton.dataset.fact);
-      }
-    });
-
-    byId("searchButton").addEventListener("click", runSearch);
-    byId("searchInput").addEventListener("keydown", (event) => {
-      if (event.key === "Enter") runSearch();
-    });
-    byId("searchInput").addEventListener("input", (event) => {
-      renderTree(event.target.value);
-    });
-    byId("treeTab").addEventListener("click", () => selectTab("tree"));
-    byId("searchTab").addEventListener("click", () => selectTab("search"));
-    byId("previewButton").addEventListener("click", () => setMode("preview"));
-    byId("rawButton").addEventListener("click", () => setMode("raw"));
-    byId("refreshButton").addEventListener("click", async () => {
-      await loadTree();
-      if (state.selectedPath) await openFile(state.selectedPath);
-    });
-    byId("newEntityBtn").addEventListener("click", openNewEntityModal);
-    byId("addFactBtn").addEventListener("click", openAddFactModal);
-    byId("reloadReviewsBtn").addEventListener("click", loadReviews);
-    byId("modalCancel").addEventListener("click", closeModal);
-    byId("modalSave").addEventListener("click", async () => {
-      if (!state.modalSubmit) return;
-      try {
-        await state.modalSubmit();
-      } catch (error) {
-        alert(error.message);
-      }
-    });
-    byId("closeSource").addEventListener("click", () => {
-      byId("sourcePanel").classList.remove("open");
-    });
-
-    loadTree().then(() => {
-      const preferred = state.files.find(path => path === "company/tickets/1032.md") || state.files[0];
-      if (preferred) openFile(preferred);
-    }).catch(error => {
-      byId("emptyState").textContent = error.message;
-    });
+    }).catch(() => {});
   </script>
 </body>
 </html>

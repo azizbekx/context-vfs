@@ -3,7 +3,11 @@ from __future__ import annotations
 import json
 import os
 import re
+import warnings
 from typing import Any
+
+# Suppress the harmless thought_signature warnings from the SDK to keep terminal clean
+warnings.filterwarnings("ignore", message=".*thought_signature.*")
 
 GENERATION_MODEL = "gemini-3.1-flash-lite-preview"
 EMBEDDING_MODEL = "gemini-embedding-2"
@@ -109,3 +113,89 @@ def embed_text(text: str) -> list[float]:
     if values is None:
         raise ValueError("Could not read embedding values")
     return [float(v) for v in values]
+
+
+def resolve_conflict(
+    entity_id: str,
+    entity_type: str,
+    predicate: str,
+    value_a: str,
+    source_a: str,
+    confidence_a: float,
+    date_a: str,
+    value_b: str,
+    source_b: str,
+    confidence_b: float,
+    date_b: str,
+) -> dict[str, Any]:
+    """Ask the LLM to analyze a fact conflict and return a structured resolution.
+
+    Returns a dict with keys:
+        resolution: "auto_resolve" | "needs_human_review"
+        winner: "A" | "B" | None
+        reason: str
+        conflict_category: str
+        confidence: float
+        human_summary: str | None
+    """
+    prompt = (
+        "You are an enterprise data conflict resolver for a company knowledge base.\n\n"
+        "CONFLICT:\n"
+        f"  Entity: {entity_id} ({entity_type})\n"
+        f"  Predicate: {predicate}\n\n"
+        f'VALUE A: "{value_a}"\n'
+        f"  Source: {source_a}\n"
+        f"  Confidence: {confidence_a}\n"
+        f"  Observed: {date_a}\n\n"
+        f'VALUE B: "{value_b}"\n'
+        f"  Source: {source_b}\n"
+        f"  Confidence: {confidence_b}\n"
+        f"  Observed: {date_b}\n\n"
+        "ANALYSIS REQUIRED:\n"
+        "1. Are these values semantically identical (synonyms, abbreviations, formatting differences)?\n"
+        "2. Does one source clearly supersede the other (newer version, higher authority system)?\n"
+        "3. Could both be valid at different points in time (temporal change, e.g. HQ moved)?\n"
+        "4. Is this a genuine contradiction that requires human review?\n\n"
+        "Respond with ONLY valid JSON:\n"
+        "{\n"
+        '  "resolution": "auto_resolve" or "needs_human_review",\n'
+        '  "winner": "A" or "B" or null,\n'
+        '  "reason": "one sentence explaining why",\n'
+        '  "conflict_category": one of "synonym" | "version_superseded" | "temporal_change" | "authority_mismatch" | "genuine_contradiction" | "data_quality",\n'
+        '  "confidence": 0.0 to 1.0,\n'
+        '  "human_summary": "If needs_human_review, a specific explanation for the human reviewer, otherwise null"\n'
+        "}"
+    )
+
+    client = _client()
+    from google.genai import types
+
+    response = client.models.generate_content(
+        model=GENERATION_MODEL,
+        contents=prompt,
+        config=types.GenerateContentConfig(temperature=0.1),
+    )
+    try:
+        result = _parse_json_response(response.text)
+        # Validate required keys
+        result.setdefault("resolution", "needs_human_review")
+        result.setdefault("winner", None)
+        result.setdefault("reason", "LLM could not determine a reason.")
+        result.setdefault("conflict_category", "genuine_contradiction")
+        result.setdefault("confidence", 0.5)
+        result.setdefault("human_summary", None)
+        return result
+    except (json.JSONDecodeError, Exception):
+        return {
+            "resolution": "needs_human_review",
+            "winner": None,
+            "reason": "LLM response could not be parsed.",
+            "conflict_category": "genuine_contradiction",
+            "confidence": 0.0,
+            "human_summary": (
+                f"Multiple sources disagree on '{predicate}'. "
+                f"Source A ({source_a}) says '{value_a}', "
+                f"Source B ({source_b}) says '{value_b}'. "
+                "Please verify which is current."
+            ),
+        }
