@@ -133,6 +133,16 @@ CONTEXT_BASE_OUT_DIR=context_base_demo_out python3 mcp_server.py
 python3 mcp_server.py --out-dir context_base_demo_out
 ```
 
+Verify MCP setup before connecting an agent:
+
+```bash
+python3.10 -m pip install -r requirements.txt
+python3.10 mcp_server.py --check-deps --out-dir context_base_out
+```
+
+The HTTP API and local tests run on Python 3.9 in this repo, but external MCP
+clients require the `mcp` package, which requires Python 3.10 or newer.
+
 Agent tools exposed by the MCP server:
 
 - `get_context_base_status`: graph, source, review, and VFS counts.

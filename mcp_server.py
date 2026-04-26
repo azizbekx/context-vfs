@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -28,7 +29,18 @@ class _LocalToolRegistry:
         return decorator
 
     def run(self):
-        raise SystemExit("Please install MCP dependencies first: pip install -r requirements.txt")
+        python_hint = (
+            "MCP package requires Python 3.10 or newer; this interpreter is "
+            f"{sys.version_info.major}.{sys.version_info.minor}."
+            if sys.version_info < (3, 10)
+            else "Install the missing MCP package in this interpreter."
+        )
+        raise SystemExit(
+            "MCP runtime dependency is missing.\n"
+            f"{python_hint}\n"
+            "Install it with: python3.10 -m pip install -r requirements.txt\n"
+            "Then verify with: python3 mcp_server.py --check-deps"
+        )
 
 
 mcp = FastMCP("Context Base") if FastMCP else _LocalToolRegistry("Context Base")
@@ -54,6 +66,30 @@ def get_db(out_dir: Path | None = None) -> Store:
 
 def _refresh_vfs(db: Store) -> int:
     return VFSGenerator(db, DEFAULT_OUT_DIR).generate()
+
+
+def _refresh_entities(db: Store, entity_ids: list[str]) -> int:
+    return VFSGenerator(db, DEFAULT_OUT_DIR).refresh_entities(entity_ids)
+
+
+def _refresh_review(db: Store, review_id: str) -> int:
+    return VFSGenerator(db, DEFAULT_OUT_DIR).refresh_review(review_id)
+
+
+def check_dependencies() -> dict[str, Any]:
+    python_ok = sys.version_info >= (3, 10)
+    mcp_ok = FastMCP is not None
+    return {
+        "ok": python_ok and mcp_ok,
+        "python": sys.version.split()[0],
+        "python_ok_for_mcp": python_ok,
+        "mcp_installed": mcp_ok,
+        "out_dir": str(DEFAULT_OUT_DIR),
+        "database_exists": (DEFAULT_OUT_DIR / "context.db").exists(),
+        "vfs_exists": (DEFAULT_OUT_DIR / "vfs").exists(),
+        "install_command": "python3.10 -m pip install -r requirements.txt",
+        "mcp_command": f"python3.10 mcp_server.py --out-dir {DEFAULT_OUT_DIR}",
+    }
 
 
 @mcp.tool()
@@ -207,7 +243,7 @@ def resolve_review_item(review_id: str, choice_id: str) -> str:
                     "choice_id": choice_id,
                 }
             )
-        files_generated = _refresh_vfs(db)
+        files_generated = _refresh_review(db, review_id)
         return _json(
             {
                 "ok": True,
@@ -246,7 +282,7 @@ def add_entity_fact(
             extraction_method="manual",
         )
         db.commit()
-        files_generated = _refresh_vfs(db)
+        files_generated = _refresh_entities(db, [entity_id])
         return _json({"ok": True, "fact_id": fact_id, "files_generated": files_generated})
     finally:
         db.close()
@@ -261,6 +297,15 @@ if __name__ == "__main__":
         default=os.environ.get("CONTEXT_BASE_OUT_DIR", str(DEFAULT_OUT_DIR)),
         help="Context-base output directory containing context.db and vfs/.",
     )
+    parser.add_argument(
+        "--check-deps",
+        action="store_true",
+        help="Check MCP runtime dependency and context-base paths, then exit.",
+    )
     args = parser.parse_args()
     set_out_dir(args.out_dir)
+    if args.check_deps:
+        status = check_dependencies()
+        print(_json(status))
+        raise SystemExit(0 if status["ok"] else 1)
     mcp.run()

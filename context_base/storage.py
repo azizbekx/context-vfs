@@ -414,6 +414,72 @@ class Store:
                 rows,
             )
 
+    def refresh_search_index(
+        self,
+        *,
+        entity_ids: Iterable[str] = (),
+        file_paths: Iterable[str] = (),
+    ) -> None:
+        entity_ids = list(dict.fromkeys(entity_ids))
+        file_paths = list(dict.fromkeys(file_paths))
+        if entity_ids:
+            placeholders = ",".join("?" for _ in entity_ids)
+            self.conn.execute(
+                f"DELETE FROM search_index WHERE kind IN ('entity', 'fact') AND entity_id IN ({placeholders})",
+                tuple(entity_ids),
+            )
+            self.conn.execute(
+                f"""
+                INSERT INTO search_index (kind, ref_id, entity_id, path, title, body)
+                SELECT 'entity', e.id, e.id, e.path, e.name,
+                       e.type || ' ' || COALESCE(e.summary, '') || ' ' || e.aliases_json
+                FROM entities e
+                WHERE e.id IN ({placeholders})
+                """,
+                tuple(entity_ids),
+            )
+            self.conn.execute(
+                f"""
+                INSERT INTO search_index (kind, ref_id, entity_id, path, title, body)
+                SELECT 'fact', f.id, f.subject_id, e.path,
+                       e.name || ' ' || f.predicate,
+                       f.predicate || ' ' || COALESCE(f.value, '') || ' ' ||
+                       COALESCE(f.object_entity_id, '') || ' ' || s.dataset_path || '#' || s.record_id
+                FROM facts f
+                JOIN entities e ON e.id = f.subject_id
+                JOIN source_records s ON s.id = f.source_id
+                WHERE f.status IN ('generated', 'confirmed')
+                  AND f.subject_id IN ({placeholders})
+                """,
+                tuple(entity_ids),
+            )
+        if file_paths:
+            placeholders = ",".join("?" for _ in file_paths)
+            self.conn.execute(
+                f"DELETE FROM search_index WHERE kind = 'file' AND path IN ({placeholders})",
+                tuple(file_paths),
+            )
+            vfs_root = self.db_path.parent / "vfs"
+            rows = []
+            for relative in file_paths:
+                path = vfs_root / relative
+                if not path.exists() or not path.is_file():
+                    continue
+                title = relative
+                text = path.read_text(encoding="utf-8", errors="ignore")
+                for line in text.splitlines():
+                    if line.startswith("# "):
+                        title = line[2:].strip()
+                        break
+                rows.append(("file", relative, None, relative, title, text))
+            self.conn.executemany(
+                """
+                INSERT INTO search_index (kind, ref_id, entity_id, path, title, body)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                rows,
+            )
+
     def upsert_review(
         self,
         *,

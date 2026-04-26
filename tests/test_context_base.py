@@ -585,8 +585,15 @@ class ContextBaseTests(unittest.TestCase):
             json={"predicate": "human_note", "value": "API-confirmed context note."},
         )
         self.assertEqual(response.status_code, 200)
+        self.assertLess(
+            response.json()["files_generated"],
+            len(list((self.out / "vfs").rglob("*.md"))),
+        )
         text = (self.out / "vfs/company/employees/emp_1.md").read_text(encoding="utf-8")
         self.assertIn("API-confirmed context note.", text)
+        results = search(store := Store(self.out / "context.db"), self.out, "API-confirmed context note")
+        store.close()
+        self.assertTrue(any(item.get("entity_id") == "employee:emp_1" for item in results))
 
     def test_mcp_tools_support_agent_judgement_workflow(self) -> None:
         store = self._build()
@@ -634,10 +641,14 @@ class ContextBaseTests(unittest.TestCase):
                 )
             )
             self.assertTrue(write_payload["ok"])
+            self.assertLess(write_payload["files_generated"], status["vfs_files"])
             updated_text = (self.out / "vfs/company/tickets/t1.md").read_text(
                 encoding="utf-8"
             )
             self.assertIn("Agent verified this ticket", updated_text)
+            setup_status = mcp_server.check_dependencies()
+            self.assertIn("install_command", setup_status)
+            self.assertTrue(setup_status["database_exists"])
         finally:
             mcp_server.set_out_dir(original_out_dir)
 

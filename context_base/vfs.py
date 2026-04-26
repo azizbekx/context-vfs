@@ -58,7 +58,62 @@ class VFSGenerator:
         self.store.commit()
         return count
 
+    def refresh_entities(self, entity_ids: list[str] | set[str]) -> int:
+        """Regenerate files affected by entity-scoped mutations.
+
+        This is intentionally narrower than ``generate``: it rewrites the
+        touched entity files, directly related entity files whose relationship
+        sections can change, and operational index pages. It avoids a full pass
+        over every entity file in large context bases.
+        """
+        self.vfs_root.mkdir(parents=True, exist_ok=True)
+        self._generated_paths = set()
+        count = 0
+        expanded_entity_ids = self._expand_entity_ids(set(entity_ids))
+        for entity_id in sorted(expanded_entity_ids):
+            row = self.store.row(
+                "SELECT * FROM entities WHERE id = ? AND path IS NOT NULL AND type IN (%s)"
+                % ",".join("?" for _ in RENDERED_TYPES),
+                (entity_id, *tuple(sorted(RENDERED_TYPES))),
+            )
+            if not row:
+                continue
+            self.write_file(row["path"], self.render_entity(dict(row)), row["id"])
+            count += 1
+        count += self.generate_index_pages()
+        count += self.generate_source_coverage()
+        self.store.refresh_search_index(
+            entity_ids=expanded_entity_ids,
+            file_paths=getattr(self, "_generated_paths", set()),
+        )
+        self.store.commit()
+        return count
+
+    def refresh_review(self, review_id: str) -> int:
+        self.vfs_root.mkdir(parents=True, exist_ok=True)
+        self._generated_paths = set()
+        review = self.store.row("SELECT * FROM review_items WHERE id = ?", (review_id,))
+        count = 0
+        path = f"company/reviews/conflicts/{review_id.replace(':', '-')}.md"
+        entity_ids = {review["entity_id"]} if review else set()
+        if review and review["status"] == "open":
+            self.write_file(path, self.render_review(dict(review)), review["entity_id"])
+            count += 1
+        else:
+            self.remove_file(path)
+        count += self.generate_reviews()
+        count += self.generate_index_pages()
+        count += self.generate_source_coverage()
+        self.store.refresh_search_index(
+            entity_ids=self._expand_entity_ids(entity_ids),
+            file_paths=getattr(self, "_generated_paths", set()) | {path},
+        )
+        self.store.commit()
+        return count
+
     def write_file(self, relative_path: str, content: str, entity_id: str | None) -> None:
+        if not hasattr(self, "_generated_paths"):
+            self._generated_paths = set()
         self._generated_paths.add(relative_path)
         target = self.vfs_root / relative_path
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -66,6 +121,13 @@ class VFSGenerator:
         if existing != content:
             target.write_text(content, encoding="utf-8")
         self.store.upsert_vfs_file(relative_path, entity_id, content)
+
+    def remove_file(self, relative_path: str) -> None:
+        root = self.vfs_root.resolve()
+        target = (self.vfs_root / relative_path).resolve()
+        if root in target.parents and target.exists() and target.is_file():
+            target.unlink()
+        self.store.conn.execute("DELETE FROM vfs_files WHERE path = ?", (relative_path,))
 
     def prune_stale_files(self) -> None:
         generated = getattr(self, "_generated_paths", set())
@@ -500,6 +562,24 @@ class VFSGenerator:
 
     def _link(self, path: str | None, label: str) -> str:
         return f"[[{path}|{label}]]" if path else label
+
+    def _expand_entity_ids(self, entity_ids: set[str]) -> set[str]:
+        if not entity_ids:
+            return set()
+        placeholders = ",".join("?" for _ in entity_ids)
+        related = self.store.rows(
+            f"""
+            SELECT from_entity_id AS id
+            FROM edges
+            WHERE to_entity_id IN ({placeholders})
+            UNION
+            SELECT to_entity_id AS id
+            FROM edges
+            WHERE from_entity_id IN ({placeholders})
+            """,
+            (*entity_ids, *entity_ids),
+        )
+        return entity_ids | {row["id"] for row in related}
 
 
 def tree(vfs_root: Path) -> list[str]:

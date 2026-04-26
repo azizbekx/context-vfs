@@ -47,6 +47,12 @@ def create_app(db_path: Path, out_dir: Path):
     def refresh_vfs(db: Store) -> int:
         return VFSGenerator(db, out_dir).generate()
 
+    def refresh_entities(db: Store, entity_ids: list[str]) -> int:
+        return VFSGenerator(db, out_dir).refresh_entities(entity_ids)
+
+    def refresh_review(db: Store, review_id: str) -> int:
+        return VFSGenerator(db, out_dir).refresh_review(review_id)
+
     @app.get("/", response_class=HTMLResponse)
     def index():
         return HTMLResponse(CONTEXT_BROWSER_HTML)
@@ -166,7 +172,7 @@ def create_app(db_path: Path, out_dir: Path):
         try:
             if not db.resolve_review(review_id, body.choice):
                 raise HTTPException(status_code=404, detail="Review or choice not found")
-            files_generated = refresh_vfs(db)
+            files_generated = refresh_review(db, review_id)
             return {"ok": True, "files_generated": files_generated}
         finally:
             db.close()
@@ -187,7 +193,7 @@ def create_app(db_path: Path, out_dir: Path):
                 summary=body.summary,
             )
             db.commit()
-            files_generated = refresh_vfs(db)
+            files_generated = refresh_entities(db, [body.entity_id])
             return {
                 "ok": True,
                 "entity_id": body.entity_id,
@@ -216,7 +222,7 @@ def create_app(db_path: Path, out_dir: Path):
                 extraction_method="manual",
             )
             db.commit()
-            files_generated = refresh_vfs(db)
+            files_generated = refresh_entities(db, [entity_id])
             return {"ok": True, "fact_id": fact_id, "files_generated": files_generated}
         finally:
             db.close()
@@ -228,6 +234,9 @@ def create_app(db_path: Path, out_dir: Path):
             existing = db.row("SELECT * FROM facts WHERE id = ?", (fact_id,))
             if not existing:
                 raise HTTPException(status_code=404, detail="Fact not found")
+            refresh_ids = [existing["subject_id"]]
+            if existing["object_entity_id"]:
+                refresh_ids.append(existing["object_entity_id"])
             updates = []
             params: list[Any] = []
             if body.value is not None:
@@ -246,7 +255,7 @@ def create_app(db_path: Path, out_dir: Path):
                 f"UPDATE facts SET {', '.join(updates)} WHERE id = ?", params
             )
             db.commit()
-            files_generated = refresh_vfs(db)
+            files_generated = refresh_entities(db, refresh_ids)
             return {"ok": True, "files_generated": files_generated}
         finally:
             db.close()
@@ -255,10 +264,16 @@ def create_app(db_path: Path, out_dir: Path):
     def delete_fact(fact_id: str):
         db = store()
         try:
+            existing = db.row("SELECT subject_id, object_entity_id FROM facts WHERE id = ?", (fact_id,))
+            if not existing:
+                raise HTTPException(status_code=404, detail="Fact not found")
+            refresh_ids = [existing["subject_id"]]
+            if existing["object_entity_id"]:
+                refresh_ids.append(existing["object_entity_id"])
             if not db.delete_fact(fact_id):
                 raise HTTPException(status_code=404, detail="Fact not found")
             db.commit()
-            files_generated = refresh_vfs(db)
+            files_generated = refresh_entities(db, refresh_ids)
             return {"ok": True, "files_generated": files_generated}
         finally:
             db.close()
@@ -267,10 +282,15 @@ def create_app(db_path: Path, out_dir: Path):
     def delete_entity(entity_id: str):
         db = store()
         try:
+            existing = db.row("SELECT path FROM entities WHERE id = ?", (entity_id,))
+            if not existing:
+                raise HTTPException(status_code=404, detail="Entity not found")
             if not db.delete_entity(entity_id):
                 raise HTTPException(status_code=404, detail="Entity not found")
+            if existing["path"]:
+                VFSGenerator(db, out_dir).remove_file(existing["path"])
             db.commit()
-            files_generated = refresh_vfs(db)
+            files_generated = refresh_entities(db, [])
             return {"ok": True, "files_generated": files_generated}
         finally:
             db.close()
