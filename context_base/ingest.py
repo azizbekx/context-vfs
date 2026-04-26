@@ -5,6 +5,7 @@ import json
 import logging
 import re
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
 
@@ -681,7 +682,103 @@ class ContextBuilder:
             for idx, step in enumerate(steps, start=1):
                 self.fact(process_id, f"step_{idx}", source_id, value=step, confidence=0.64, extraction_method="deterministic-policy")
 
+    # ── Predicates that naturally have multiple distinct values ──
+    MULTI_VALUE_PREDICATES = frozenset({
+        "text", "body", "content", "review_content", "about_product",
+        "engagement_description", "relationship_description",
+        "issue", "resolution", "description", "experience",
+        "invoice_paths", "purchase_order_paths", "shipping_order_paths",
+        "skills", "reportees", "overflow_type",
+    })
+
+    @staticmethod
+    def _is_multi_value_predicate(predicate: str) -> bool:
+        """Return True for predicates that naturally hold multiple values."""
+        if predicate in ContextBuilder.MULTI_VALUE_PREDICATES:
+            return True
+        if re.match(r"^(step_\d+|defines:|role:)", predicate):
+            return True
+        return False
+
+    @staticmethod
+    def _extract_version(dataset_path: str) -> int | None:
+        """Extract a version number from paths like 'policy_v3.pdf'."""
+        match = re.search(r"_v(\d+)", dataset_path, re.IGNORECASE)
+        if match:
+            return int(match.group(1))
+        match = re.search(r"version[_\s-]?(\d+)", dataset_path, re.IGNORECASE)
+        if match:
+            return int(match.group(1))
+        return None
+
+    @staticmethod
+    def _extract_date_from_fact(fact: dict[str, Any]) -> str:
+        """Get the most relevant date from a fact's source context."""
+        raw = {}
+        try:
+            raw = json.loads(fact.get("raw_json") or "{}")
+        except (json.JSONDecodeError, TypeError):
+            pass
+        for key in (
+            "date", "Date", "assigned_date", "review_date",
+            "Date_of_Purchase", "created_date", "interaction_date",
+            "DOJ", "onboarding_date",
+        ):
+            val = raw.get(key)
+            if val and str(val).strip() and str(val).strip().lower() != "present":
+                return str(val).strip()
+        return fact.get("observed_at") or ""
+
+    @staticmethod
+    def _date_sort_key(value: str) -> datetime | None:
+        """Parse common dataset date formats for recency comparisons."""
+        text = str(value or "").strip()
+        if not text:
+            return None
+        iso_text = text.removesuffix("Z")
+        try:
+            return datetime.fromisoformat(iso_text)
+        except ValueError:
+            pass
+        for fmt in (
+            "%Y-%m-%d",
+            "%Y/%m/%d",
+            "%m/%d/%Y",
+            "%d/%m/%Y",
+            "%B %d, %Y",
+            "%b %d, %Y",
+            "%Y",
+        ):
+            try:
+                return datetime.strptime(text, fmt)
+            except ValueError:
+                continue
+        return None
+
+    @staticmethod
+    def _extract_source_snippet(fact: dict[str, Any], max_fields: int = 4) -> str:
+        """Pull the most informative fields from the raw source JSON."""
+        raw = {}
+        try:
+            raw = json.loads(fact.get("raw_json") or "{}")
+        except (json.JSONDecodeError, TypeError):
+            pass
+        if not raw:
+            return ""
+        skip = {"id", "emp_id", "customer_id", "product_id", "sales_record_id", "chat_id"}
+        parts = []
+        for key, val in raw.items():
+            if key.lower() in skip or not val or not str(val).strip():
+                continue
+            text = clean_text(val, 120)
+            if text:
+                parts.append(f"{key}: {text}")
+            if len(parts) >= max_fields:
+                break
+        return " | ".join(parts)
+
     def detect_conflicts(self) -> None:
+        # ── Phase 1: Find ALL predicates with multiple distinct values ──
         rows = self.store.rows(
             """
             SELECT subject_id, predicate, COUNT(DISTINCT value) AS value_count
@@ -689,35 +786,52 @@ class ContextBuilder:
             WHERE status IN ('generated', 'confirmed')
               AND object_entity_id IS NULL
               AND value IS NOT NULL
-              AND confidence >= 0.8
-              AND predicate IN ('name', 'email', 'department', 'priority', 'poc_status', 'current_poc_product')
+              AND (status = 'confirmed' OR confidence >= 0.6)
             GROUP BY subject_id, predicate
             HAVING value_count > 1
             """
         )
         for row in rows:
+            # Skip predicates that naturally have multiple values
+            if self._is_multi_value_predicate(row["predicate"]):
+                continue
+
             facts = self.store.rows(
                 """
-                SELECT f.id, f.subject_id, f.predicate, f.value, f.confidence, s.dataset_path, s.record_id
+                SELECT f.id, f.subject_id, f.predicate, f.value, f.confidence,
+                       f.status,
+                       s.dataset_path, s.record_id, s.raw_json, s.observed_at
                 FROM facts f
                 JOIN source_records s ON s.id = f.source_id
                 WHERE f.subject_id = ? AND f.predicate = ? AND f.status IN ('generated', 'confirmed')
+                  AND (f.status = 'confirmed' OR f.confidence >= 0.6)
                 ORDER BY f.confidence DESC, s.dataset_path
                 """,
                 (row["subject_id"], row["predicate"]),
             )
-            winner_id = self._auto_resolve(list(facts))
+            facts = [dict(f) for f in facts]
+            if len(facts) < 2:
+                continue
+
+            # ── Phase 2: Run the 6-strategy auto-resolution pipeline ──
+            winner_id, resolution_reason = self._auto_resolve(facts)
             if winner_id:
                 loser_ids = [f["id"] for f in facts if f["id"] != winner_id]
                 self.store.auto_resolve_conflict(winner_id, loser_ids)
                 logger.info(
-                    "Auto-resolved %s/%s: winner=%s losers=%d",
+                    "Auto-resolved %s/%s: winner=%s losers=%d reason=%s",
                     row["subject_id"],
                     row["predicate"],
                     winner_id,
                     len(loser_ids),
+                    resolution_reason,
                 )
                 continue
+
+            # ── Phase 3: Create an enriched review item ──
+            conflict_type = "fact_value_conflict"
+            suggested = self._build_fallback_suggestion(row, facts)
+
             candidates = []
             for index, fact in enumerate(facts, start=1):
                 candidates.append(
@@ -727,110 +841,138 @@ class ContextBuilder:
                         "value": fact["value"],
                         "confidence": fact["confidence"],
                         "source": f"{fact['dataset_path']}#{fact['record_id']}",
+                        "snippet": self._extract_source_snippet(fact),
                     }
                 )
             review_id = stable_id("review", row["subject_id"], row["predicate"], candidates, length=18)
             self.store.upsert_review(
                 review_id=review_id,
                 entity_id=row["subject_id"],
-                conflict_type="fact_value_conflict",
+                conflict_type=conflict_type,
                 predicate=row["predicate"],
                 candidates=candidates,
-                suggested_resolution="Choose the source of truth or keep the highest-confidence current system value.",
+                suggested_resolution=suggested,
             )
             self.stats = self.stats.add(reviews=1)
 
-    def _auto_resolve(self, facts: list[dict[str, Any]]) -> str | None:
+    @staticmethod
+    def _build_fallback_suggestion(row: dict[str, Any], facts: list[dict[str, Any]]) -> str:
+        """Build a descriptive suggestion when LLM is unavailable."""
+        values = [f["value"] for f in facts[:3] if f.get("value")]
+        sources = [f"{f['dataset_path']}#{f['record_id']}" for f in facts[:3]]
+        parts = []
+        for val, src in zip(values, sources):
+            parts.append(f"'{clean_text(val, 80)}' (from {src})")
+        listing = " vs ".join(parts)
+        return (
+            f"Multiple sources disagree on '{row['predicate']}': {listing}. "
+            "Please verify which value is current and authoritative."
+        )
+
+    def _auto_resolve(self, facts: list[dict[str, Any]]) -> tuple[str | None, str]:
+        """6-strategy auto-resolution pipeline.
+
+        Returns (winner_fact_id, reason_string) or (None, "") if unresolvable.
+        """
         if len(facts) <= 1:
-            return facts[0]["id"] if facts else None
-        values = [f["value"] for f in facts if f["value"]]
+            return (facts[0]["id"] if facts else None, "single_fact")
+
+        values = [f["value"] for f in facts if f.get("value")]
         if not values:
-            return facts[0]["id"]
+            return (facts[0]["id"], "no_values")
+
+        # ── Strategy 1: Normalization ──
         normalized = {v.strip().lower() for v in values}
         if len(normalized) == 1:
-            return max(facts, key=lambda f: f["confidence"])["id"]
-        preferred = self._source_of_truth_winner(facts)
-        if preferred:
-            return preferred
+            winner = max(facts, key=lambda f: f["confidence"])
+            return (winner["id"], "normalization_match")
+
+        # ── Strategy 2: Empty / null filter ──
         non_empty = [
-            f
-            for f in facts
-            if f["value"]
+            f for f in facts
+            if f.get("value")
             and f["value"].strip()
-            and f["value"].strip().lower() not in ("none", "null", "n/a", "-", "")
+            and f["value"].strip().lower() not in ("none", "null", "n/a", "-", "", "unknown", "tbd")
         ]
         if len(non_empty) == 1:
-            return non_empty[0]["id"]
+            return (non_empty[0]["id"], "empty_value_filtered")
+        if not non_empty:
+            return (facts[0]["id"], "all_empty")
 
-        # LLM Synonym Detection
-        if self.use_llm:
-            unique_values = list({f["value"].strip() for f in non_empty})
-            if len(unique_values) == 2:
-                try:
-                    from google import genai
-                    from .llm import GENERATION_MODEL
-                    import os
-                    api_key = os.environ.get("GEMINI_API_KEY")
-                    if not api_key:
-                        raise ValueError("GEMINI_API_KEY not set")
-                    client = genai.Client(api_key=api_key)
-                    prompt = (
-                        "You are an automated data conflict resolution system.\n"
-                        f"Fact predicate: {facts[0].get('predicate')}\n"
-                        f"Value A: {unique_values[0]}\n"
-                        f"Value B: {unique_values[1]}\n\n"
-                        "Are these two values functionally identical (e.g., synonyms, acronyms, or slight formatting differences of the same entity/concept)?\n"
-                        "Respond ONLY with 'YES' or 'NO'."
-                    )
-                    response = client.models.generate_content(
-                        model=GENERATION_MODEL, 
-                        contents=prompt,
-                        config={"temperature": 0.1}
-                    )
-                    if response.text and "YES" in response.text.upper():
-                        return max(non_empty, key=lambda f: f["confidence"])["id"]
-                except Exception as e:
-                    logger.warning("LLM auto-resolve failed: %s", e)
+        # ── Strategy 3: Source-of-truth rules ──
+        preferred = self._source_of_truth_winner(non_empty)
+        if preferred:
+            return (preferred, "source_of_truth")
 
-        return None
+        # ── Strategy 4: Version detection ──
+        versioned = []
+        for f in non_empty:
+            ver = self._extract_version(f.get("dataset_path", ""))
+            if ver is not None:
+                versioned.append((ver, f))
+        if len(versioned) >= 2:
+            versioned.sort(key=lambda x: x[0], reverse=True)
+            highest_ver = versioned[0][0]
+            top_version_facts = [f for v, f in versioned if v == highest_ver]
+            if len(top_version_facts) == 1:
+                return (top_version_facts[0]["id"], f"version_v{highest_ver}_supersedes")
+
+        # ── Strategy 5: Temporal recency ──
+        # Only apply to trajectory-like predicates where "latest wins" makes sense
+        trajectory_predicates = {
+            "status", "priority", "assigned_to", "poc_status",
+            "current_poc_product", "level", "department", "reports_to",
+        }
+        if facts[0].get("predicate") in trajectory_predicates:
+            dated = []
+            for f in non_empty:
+                d = self._extract_date_from_fact(f)
+                parsed = self._date_sort_key(d)
+                if parsed:
+                    dated.append((parsed, d, f))
+            if len(dated) >= 2:
+                dated.sort(key=lambda x: x[0], reverse=True)
+                if dated[0][0] != dated[1][0]:  # Different dates
+                    return (dated[0][2]["id"], f"temporal_recency_{dated[0][1]}")
+
+        # ── Strategy 6: LLM semantic analysis ──
+        # This is handled in detect_conflicts() after _auto_resolve returns None,
+        # so we don't duplicate the LLM call here.
+
+        return (None, "")
 
     def _source_of_truth_winner(self, facts: list[dict[str, Any]]) -> str | None:
+        """Determine if one source is the canonical authority for this entity type.
+
+        HR is the source of truth for ALL employee data.
+        ITSM is the source of truth for ALL ticket operational data.
+        CRM/Business is the source of truth for ALL client/customer data.
+        Policy Documents are the source of truth for ALL policy data.
+        """
         if not facts:
             return None
-        predicate = facts[0]["predicate"]
-        subject_id = clean_text(facts[0]["subject_id"])
-        source_rules = []
-        if subject_id.startswith("employee:") and predicate in {
-            "name",
-            "email",
-            "department",
-            "reports_to",
-            "level",
-        }:
+        subject_id = clean_text(facts[0].get("subject_id", ""))
+        source_rules: list[str] = []
+
+        if subject_id.startswith("employee:"):
+            # HR is always authoritative for employee identity & profile
             source_rules = ["Human_Resource_Management/Employees/"]
-        elif subject_id.startswith("ticket:") and predicate in {
-            "priority",
-            "status",
-            "assigned_to",
-            "assigned_date",
-        }:
+        elif subject_id.startswith("ticket:"):
             source_rules = ["IT_Service_Management/"]
-        elif subject_id.startswith(("customer:", "client:")) and predicate in {
-            "owner",
-            "business_representative",
-            "poc_status",
-            "current_poc_product",
-        }:
+        elif subject_id.startswith(("customer:", "client:")):
             source_rules = ["Customer_Relation_Management/", "Business_and_Management/"]
+        elif subject_id.startswith("vendor:"):
+            source_rules = ["Business_and_Management/"]
         elif subject_id.startswith("policy:"):
             source_rules = ["Policy_Documents/"]
+
         if not source_rules:
             return None
 
         candidates = [
             fact
             for fact in facts
-            if any(str(fact["dataset_path"]).startswith(prefix) for prefix in source_rules)
+            if any(str(fact.get("dataset_path", "")).startswith(prefix) for prefix in source_rules)
         ]
         if len(candidates) == 1:
             return candidates[0]["id"]
@@ -853,6 +995,12 @@ class ContextBuilder:
         name_conflict = resume_name and hr_name and resume_name.lower() != hr_name.lower()
         email_conflict = resume_email and hr_email and resume_email.lower() != hr_email.lower()
         if not name_conflict and not email_conflict:
+            return
+        if not resume_email:
+            return
+
+        alternate_employee = self._employee_by_email(resume_email, exclude_id=employee_id)
+        if not alternate_employee:
             return
 
         resume_source = self.store.row(
@@ -885,7 +1033,10 @@ class ContextBuilder:
             {
                 "choice_id": "investigate-resume",
                 "fact_id": None,
-                "value": f"Resume: {resume_name or 'unknown'} <{resume_email or 'no email'}>",
+                "value": (
+                    f"Resume matches {alternate_employee['id']}: "
+                    f"{alternate_employee['name']} <{resume_email}>"
+                ),
                 "confidence": 0.85,
                 "source": (
                     f"{resume_source['dataset_path']}#{resume_source['record_id']}"
@@ -902,11 +1053,27 @@ class ContextBuilder:
             predicate="identity",
             candidates=candidates,
             suggested_resolution=(
-                "HR remains the source of truth for employee identity. "
-                "Investigate whether the resume is attached to the wrong employee or should become an alias."
+                "The resume email already belongs to another HR employee. "
+                "Investigate whether the resume is attached to the wrong employee ID."
             ),
         )
         self.stats = self.stats.add(reviews=1)
+
+    def _employee_by_email(self, email: str, *, exclude_id: str | None = None) -> dict[str, Any] | None:
+        needle = clean_text(email).lower()
+        if not needle:
+            return None
+        rows = self.store.rows("SELECT id, name, aliases_json FROM entities WHERE type = 'employee'")
+        for row in rows:
+            if exclude_id and row["id"] == exclude_id:
+                continue
+            try:
+                aliases = json.loads(row["aliases_json"] or "[]")
+            except json.JSONDecodeError:
+                aliases = []
+            if any(clean_text(alias).lower() == needle for alias in aliases):
+                return dict(row)
+        return None
 
     def extract_from_schema(self, schema: dict[str, Any]) -> None:
         for source_config in schema.get("sources", []):

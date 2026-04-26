@@ -7,6 +7,7 @@ import {
   RefreshCw,
   X,
   Save,
+  Sparkles,
 } from 'lucide-react';
 import { fetchReviews, resolveReview, fetchFactSources } from '../api';
 
@@ -241,8 +242,15 @@ export default function ReviewQueue({ onNavigateToEntity }: ReviewQueueProps) {
       {/* QUEUE SIDEBAR */}
       <aside className="rq-queue">
         <div className="rq-queue-header">
-          <span className="rq-label">Review queue</span>
-          <span className="rq-count">{reviews.length} open</span>
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div style={{ fontWeight: 600, fontSize: 13, color: 'var(--ink)' }}>Review Queue</div>
+            <div className="rq-queue-stats">
+              <span className="rq-stat-pill">{reviews.length} remaining</span>
+              {reviewedIds.size > 0 && (
+                <span className="rq-stat-pill rq-stat-resolved">{reviewedIds.size} resolved</span>
+              )}
+            </div>
+          </div>
           <button
             className="btn-icon"
             onClick={refresh}
@@ -406,8 +414,11 @@ function ReviewDetail({
 
         {review.suggested_resolution && (
           <div className="rq-suggestion">
-            <span className="rq-label">AI suggestion</span>
-            <span>{review.suggested_resolution}</span>
+            <div className="rq-suggestion-icon"><Sparkles size={15} /></div>
+            <div>
+              <div className="rq-suggestion-label">AI Suggestion</div>
+              <div className="rq-suggestion-text">{review.suggested_resolution}</div>
+            </div>
           </div>
         )}
       </header>
