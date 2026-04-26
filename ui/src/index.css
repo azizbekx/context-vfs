@@ -1024,18 +1024,23 @@ textarea { height: auto; min-height: 64px; padding: 8px 10px; resize: vertical; 
 .rq-shell {
   display: flex;
   flex: 1;
+  height: 100%;
   min-height: 0;
   background: var(--bg);
+  overflow: hidden;
 }
 
 /* — Queue sidebar — */
 .rq-queue {
-  width: 320px;
+  width: 340px;
   background: var(--panel);
   border-right: 1px solid var(--line);
   display: flex;
   flex-direction: column;
   overflow: hidden;
+  flex-shrink: 0;
+  height: 100%;
+  min-height: 0;
 }
 
 .rq-queue-header {
@@ -1050,6 +1055,7 @@ textarea { height: auto; min-height: 64px; padding: 8px 10px; resize: vertical; 
 .rq-queue-list {
   flex: 1;
   overflow-y: auto;
+  min-height: 0;
 }
 
 .rq-queue-empty {
@@ -1119,6 +1125,9 @@ textarea { height: auto; min-height: 64px; padding: 8px 10px; resize: vertical; 
 /* — Detail pane — */
 .rq-detail {
   flex: 1;
+  height: 100%;
+  min-height: 0;
+  min-width: 0;
   overflow-y: auto;
   background: var(--bg);
 }
@@ -1504,4 +1513,159 @@ textarea { height: auto; min-height: 64px; padding: 8px 10px; resize: vertical; 
   flex-direction: column;
   gap: 4px;
   min-width: 0;
+}
+
+/* — Entity context block (above the source cards) — */
+.rq-entity-context {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 14px 18px;
+  margin-bottom: 14px;
+}
+.rq-entity-context-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 8px;
+}
+.rq-entity-context-name {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--ink);
+}
+.rq-entity-context-type {
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--muted);
+  background: var(--line-soft);
+  padding: 2px 6px;
+  border-radius: 3px;
+}
+.rq-entity-context-summary {
+  font-size: 12px;
+  color: var(--muted);
+  line-height: 1.55;
+  margin-bottom: 10px;
+}
+.rq-entity-facts-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 6px 14px;
+  font-size: 11px;
+}
+.rq-entity-fact-key {
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  font-size: 10px;
+  font-weight: 600;
+}
+.rq-entity-fact-val {
+  font-family: var(--mono);
+  color: var(--ink);
+  word-break: break-word;
+}
+
+/* — Inline diff bar — */
+.rq-diff-bar {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 12px 16px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  margin-bottom: 14px;
+  flex-wrap: wrap;
+}
+.rq-diff-label {
+  font-size: 10px;
+  letter-spacing: 0.10em;
+  text-transform: uppercase;
+  color: var(--muted);
+  font-weight: 600;
+}
+.rq-diff-old {
+  font-family: var(--mono);
+  font-size: 14px;
+  color: var(--muted);
+}
+.rq-diff-arrow { color: var(--muted); font-size: 14px; }
+.rq-diff-new {
+  font-family: var(--mono);
+  font-size: 16px;
+  color: var(--warning);
+  font-weight: 500;
+}
+.rq-diff-pill {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  background: var(--warning-soft);
+  border: 1px solid var(--warning);
+  border-radius: 4px;
+  font-size: 11px;
+  color: var(--warning);
+  font-family: var(--mono);
+  font-weight: 600;
+}
+
+/* — Per-card source preview (raw_json fields) — */
+.rq-source-preview {
+  margin-top: 10px;
+  margin-bottom: 12px;
+}
+.rq-source-preview-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 10px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--muted);
+  font-weight: 600;
+  margin-bottom: 6px;
+}
+.rq-source-preview-body {
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  padding: 8px 10px;
+  max-height: 200px;
+  overflow-y: auto;
+}
+.rq-source-preview-grid {
+  display: grid;
+  grid-template-columns: minmax(80px, auto) 1fr;
+  gap: 4px 10px;
+  font-size: 11px;
+  font-family: var(--mono);
+  line-height: 1.5;
+}
+.rq-source-preview-key {
+  color: var(--muted);
+  word-break: break-word;
+  font-weight: 500;
+}
+.rq-source-preview-val {
+  color: var(--ink);
+  word-break: break-word;
+  white-space: pre-wrap;
+}
+.rq-source-preview-loading {
+  font-size: 11px;
+  color: var(--muted);
+  padding: 4px;
+}
+.rq-source-ingested {
+  font-size: 10px;
+  color: var(--muted);
+  margin-top: 6px;
+  font-family: var(--mono);
 }

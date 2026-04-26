@@ -8,7 +8,7 @@ import {
   X,
   Save,
 } from 'lucide-react';
-import { fetchReviews, resolveReview, fetchFactSources } from '../api';
+import { fetchReviews, resolveReview, fetchFactSources, fetchEntity } from '../api';
 
 /**
  * Dedicated Review Queue page. Renders one row per open review_items
@@ -120,6 +120,13 @@ export default function ReviewQueue({ onNavigateToEntity }: ReviewQueueProps) {
   const [reviewedIds, setReviewedIds] = useState<Set<string>>(new Set());
   const [sourcePanel, setSourcePanel] = useState<unknown | null>(null);
   const [sourcePanelLoading, setSourcePanelLoading] = useState(false);
+
+  // Lazy caches keyed by id so re-selecting the same review is instant.
+  // The entity cache holds the full /entities/{id} payload (entity + facts +
+  // edges); the fact-source cache holds /facts/{id}/sources `fact` objects
+  // which carry the raw_json column from the dataset row.
+  const [entityCache, setEntityCache] = useState<Record<string, any>>({});
+  const [factSourceCache, setFactSourceCache] = useState<Record<string, any>>({});
 
   const refresh = useCallback(async () => {
     setLoading(true);
@@ -236,6 +243,32 @@ export default function ReviewQueue({ onNavigateToEntity }: ReviewQueueProps) {
     return () => window.removeEventListener('keydown', onKey);
   }, [reviews, selectedIndex, selected, advanceSelection, handleResolve]);
 
+  // Lazy: when a review is selected, prefetch the entity + each candidate's
+  // fact source. Cached per id so re-selecting is instant. Fire-and-forget;
+  // any failure just leaves the cache empty and the UI shows a fallback.
+  useEffect(() => {
+    if (!selected) return;
+    const eid = selected.entity_id;
+    if (!entityCache[eid]) {
+      fetchEntity(eid)
+        .then((data: any) => setEntityCache((c) => ({ ...c, [eid]: data })))
+        .catch(() => undefined);
+    }
+    const cands = parseCandidates(selected.candidates_json);
+    cands.forEach((c) => {
+      if (c.fact_id && !factSourceCache[c.fact_id]) {
+        fetchFactSources(c.fact_id)
+          .then((data: any) =>
+            setFactSourceCache((cache) => ({
+              ...cache,
+              [c.fact_id as string]: data?.fact ?? data,
+            }))
+          )
+          .catch(() => undefined);
+      }
+    });
+  }, [selected, entityCache, factSourceCache]);
+
   return (
     <div className="rq-shell">
       {/* QUEUE SIDEBAR */}
@@ -316,6 +349,8 @@ export default function ReviewQueue({ onNavigateToEntity }: ReviewQueueProps) {
             onResolve={handleResolve}
             onOpenFactSource={openFactSource}
             onNavigateToEntity={onNavigateToEntity}
+            entity={entityCache[selected.entity_id]}
+            factSources={factSourceCache}
           />
         )}
       </main>
@@ -350,12 +385,16 @@ function ReviewDetail({
   onResolve,
   onOpenFactSource,
   onNavigateToEntity,
+  entity,
+  factSources,
 }: {
   review: ReviewItem;
   resolving: boolean;
   onResolve: (reviewId: string, choiceId: string) => void;
   onOpenFactSource: (factId: string) => void;
   onNavigateToEntity?: (entityId: string) => void;
+  entity?: any;
+  factSources: Record<string, any>;
 }) {
   const candidates = useMemo(
     () => parseCandidates(review.candidates_json),
@@ -412,6 +451,12 @@ function ReviewDetail({
         )}
       </header>
 
+      {/* Entity context — name, type, summary, top facts */}
+      {entity && <EntityContextBlock entity={entity} />}
+
+      {/* Inline diff bar — only when both sides parse as the same numeric */}
+      <InlineDiffBar a={anchor?.value} b={variant?.value} predicate={review.predicate} />
+
       <div className="rq-section-label">
         Conflicting values · {review.predicate}
       </div>
@@ -425,6 +470,7 @@ function ReviewDetail({
             disabled={resolving}
             onAccept={() => onResolve(review.id, anchor.choice_id)}
             onOpenFactSource={onOpenFactSource}
+            factSource={anchor.fact_id ? factSources[anchor.fact_id] : undefined}
           />
         )}
         {variant && (
@@ -435,6 +481,7 @@ function ReviewDetail({
             disabled={resolving}
             onAccept={() => onResolve(review.id, variant.choice_id)}
             onOpenFactSource={onOpenFactSource}
+            factSource={variant.fact_id ? factSources[variant.fact_id] : undefined}
           />
         )}
         {!anchor && !variant && (
@@ -506,6 +553,7 @@ function SourceCard({
   disabled,
   onAccept,
   onOpenFactSource,
+  factSource,
 }: {
   candidate: Candidate;
   role: 'anchor' | 'variant';
@@ -513,10 +561,12 @@ function SourceCard({
   disabled: boolean;
   onAccept: () => void;
   onOpenFactSource: (factId: string) => void;
+  factSource?: any;
 }) {
   const confidence = Math.round((candidate.confidence ?? 0) * 100);
   const value = candidate.value || candidate.object_entity_id || '—';
   const src = parseSource(candidate.source);
+  const ingestedAt = factSource?.updated_at as string | undefined;
 
   return (
     <div className={`rq-card rq-card--${role}`}>
@@ -555,6 +605,19 @@ function SourceCard({
           </div>
         )}
 
+        {/* File preview — raw_json record fields lazy-loaded via fetchFactSources */}
+        {candidate.fact_id && (
+          <SourcePreview
+            factId={candidate.fact_id}
+            factSource={factSource}
+            highlightField={predicate}
+          />
+        )}
+
+        {ingestedAt && (
+          <div className="rq-source-ingested">ingested {formatTimestamp(ingestedAt)}</div>
+        )}
+
         <footer className="rq-card-foot">
           <div className="rq-card-foot-meta-col">
             <span className="rq-card-foot-meta">choice_id: {candidate.choice_id}</span>
@@ -578,6 +641,208 @@ function SourceCard({
             <Save size={12} /> Accept this value <ChevronRight size={12} />
           </button>
         </footer>
+      </div>
+    </div>
+  );
+}
+
+/* ──────────────────────────────────────────────────────────────────── */
+/* Entity context block — name, type, summary, top facts                */
+/* ──────────────────────────────────────────────────────────────────── */
+
+const PREFERRED_FACTS = [
+  'name', 'email', 'department', 'category', 'level', 'role', 'title',
+  'date_of_joining', 'reports_to', 'phone', 'identity', 'industry',
+];
+
+function EntityContextBlock({ entity }: { entity: any }) {
+  const e = entity?.entity;
+  const facts: any[] = entity?.facts ?? [];
+  if (!e) return null;
+
+  // Surface the most useful facts first; fall back to whatever order the
+  // backend returned for everything else.
+  const factByPredicate = new Map<string, any>();
+  facts.forEach((f) => {
+    if (!factByPredicate.has(f.predicate)) factByPredicate.set(f.predicate, f);
+  });
+  const ordered = [
+    ...PREFERRED_FACTS.filter((p) => factByPredicate.has(p)).map((p) => factByPredicate.get(p)),
+    ...facts.filter((f) => !PREFERRED_FACTS.includes(f.predicate)),
+  ].slice(0, 6);
+
+  const summary = (e.summary as string | undefined) ?? '';
+  const summaryShort = summary.length > 240 ? summary.slice(0, 240) + '…' : summary;
+
+  return (
+    <div className="rq-entity-context">
+      <div className="rq-entity-context-head">
+        <span className="rq-entity-context-name">{e.name ?? e.id}</span>
+        <span className="rq-entity-context-type">{e.type}</span>
+      </div>
+      {summaryShort && (
+        <div className="rq-entity-context-summary">{summaryShort}</div>
+      )}
+      {ordered.length > 0 && (
+        <div className="rq-entity-facts-grid">
+          {ordered.map((f) => (
+            <div key={f.id ?? f.predicate} style={{ display: 'contents' }}>
+              <span className="rq-entity-fact-key">{f.predicate}</span>
+              <span className="rq-entity-fact-val">
+                {String(f.value ?? f.object_entity_id ?? '—')}
+              </span>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ──────────────────────────────────────────────────────────────────── */
+/* Inline diff bar — only shown when both sides parse as same currency  */
+/* ──────────────────────────────────────────────────────────────────── */
+
+function parseAmount(s?: string): { num: number; currency: string } | null {
+  if (!s) return null;
+  const m = s.match(/([A-Z]{2,3}|[€$£¥])\s*([0-9][0-9,.]*)/);
+  if (!m) return null;
+  const num = parseFloat(m[2].replace(/,/g, ''));
+  if (Number.isNaN(num)) return null;
+  return { num, currency: m[1] };
+}
+
+function InlineDiffBar({
+  a,
+  b,
+  predicate,
+}: {
+  a?: string;
+  b?: string;
+  predicate: string;
+}) {
+  const numA = parseAmount(a);
+  const numB = parseAmount(b);
+  if (!numA || !numB || numA.currency !== numB.currency) return null;
+
+  const delta = numB.num - numA.num;
+  const pct = (delta / numA.num) * 100;
+  const sign = delta >= 0 ? '+' : '−';
+  const fmt = Math.abs(delta).toLocaleString('en-US', { maximumFractionDigits: 0 });
+
+  return (
+    <div className="rq-diff-bar">
+      <span className="rq-diff-label">{predicate}</span>
+      <span className="rq-diff-old">{a}</span>
+      <span className="rq-diff-arrow">→</span>
+      <span className="rq-diff-new">{b}</span>
+      <span className="rq-diff-pill">
+        Δ {sign}{numA.currency} {fmt} · {sign}{Math.abs(pct).toFixed(1)}%
+      </span>
+    </div>
+  );
+}
+
+/* ──────────────────────────────────────────────────────────────────── */
+/* Source preview — raw_json from the dataset row, lazy-loaded via      */
+/* fetchFactSources. Highlights the contested predicate so reviewers   */
+/* can see exactly which field came from this row.                      */
+/* ──────────────────────────────────────────────────────────────────── */
+
+function parseRawJson(raw?: string | null): Record<string, unknown> | null {
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(raw);
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+      return parsed as Record<string, unknown>;
+    }
+  } catch { /* ignore */ }
+  return null;
+}
+
+function SourcePreview({
+  factId,
+  factSource,
+  highlightField,
+}: {
+  factId: string;
+  factSource?: any;
+  highlightField: string;
+}) {
+  if (!factSource) {
+    return (
+      <div className="rq-source-preview">
+        <div className="rq-source-preview-head">
+          <span>Source record · loading</span>
+          <span style={{ fontFamily: 'var(--mono)' }}>{factId.slice(0, 16)}</span>
+        </div>
+        <div className="rq-source-preview-body">
+          <div className="rq-source-preview-loading">fetching raw record from dataset…</div>
+        </div>
+      </div>
+    );
+  }
+
+  const raw = parseRawJson(factSource.raw_json);
+  const datasetPath = factSource.dataset_path as string | undefined;
+  const recordId = factSource.record_id as string | undefined;
+
+  // Build a focused preview: highlight field first, then the next ~5 most
+  // useful columns. Skip very long values (truncate) so the card stays scannable.
+  const entries: Array<[string, string]> = [];
+  if (raw) {
+    const keys = Object.keys(raw);
+    const ordered = [
+      ...keys.filter((k) => k.toLowerCase() === highlightField.toLowerCase()),
+      ...keys.filter((k) => k.toLowerCase() !== highlightField.toLowerCase()),
+    ].slice(0, 8);
+    for (const k of ordered) {
+      const v = raw[k];
+      const text = v == null ? '—' : typeof v === 'object' ? JSON.stringify(v) : String(v);
+      const trimmed = text.length > 220 ? text.slice(0, 220) + '…' : text;
+      entries.push([k, trimmed]);
+    }
+  }
+
+  return (
+    <div className="rq-source-preview">
+      <div className="rq-source-preview-head">
+        <span>Source record</span>
+        <span style={{ fontFamily: 'var(--mono)' }}>
+          {datasetPath ?? '—'}{recordId ? ` # ${recordId}` : ''}
+        </span>
+      </div>
+      <div className="rq-source-preview-body">
+        {entries.length === 0 ? (
+          <div className="rq-source-preview-loading">no parseable raw_json on this record</div>
+        ) : (
+          <div className="rq-source-preview-grid">
+            {entries.map(([k, v]) => (
+              <div key={k} style={{ display: 'contents' }}>
+                <span
+                  className="rq-source-preview-key"
+                  style={
+                    k.toLowerCase() === highlightField.toLowerCase()
+                      ? { color: 'var(--warning)' }
+                      : undefined
+                  }
+                >
+                  {k}
+                </span>
+                <span
+                  className="rq-source-preview-val"
+                  style={
+                    k.toLowerCase() === highlightField.toLowerCase()
+                      ? { color: 'var(--warning)', fontWeight: 600 }
+                      : undefined
+                  }
+                >
+                  {v}
+                </span>
+              </div>
+            ))}
+          </div>
+        )}
       </div>
     </div>
   );
