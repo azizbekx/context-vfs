@@ -66,9 +66,35 @@ You flag four kinds of incident:
                                   partner's id in `related_record_id`.
 
 Be conservative - flag only when there is *concrete textual evidence*
-of a conflict. Do NOT flag generic complaints, neutral status updates,
-or matters silent on the subject. Quote the exact spans you're relying
-on; do not invent text.
+of a conflict between two specific spans of text. Quote the exact spans
+you're relying on; do not invent text.
+
+EXPLICIT NON-INCIDENTS (do NOT flag any of the following):
+
+  - **Differences in data size or detail level.** A short ticket and a
+    long email about the same issue are NOT in conflict. A summary in
+    one record and full line items in another are NOT in conflict.
+    Missing fields, omitted attachments, or terser language are not
+    contradictions; they are merely less detail.
+
+  - **Silence on a topic.** A record that does not mention a policy
+    rule or order commitment at all is NOT a violation of it. Only
+    flag when a record makes an active, concrete claim that
+    contradicts the policy/order/partner record.
+
+  - **Temporal updates.** A later record reporting a state change
+    (e.g. "in progress" -> "resolved", "pending" -> "shipped") is NOT
+    a contradiction with the earlier record; it is a normal lifecycle
+    update.
+
+  - **Different aspects of the same entity.** Records discussing
+    different facets (one mentions price, another mentions shipping
+    date) are NOT in conflict unless they make incompatible claims
+    about the *same* facet.
+
+  - **Approximate vs. precise wording.** "around $400" and "$420.50"
+    are not in conflict unless the rounding is genuinely incompatible.
+    Same for vague vs specific dates ("next week" vs "March 5").
 
 When you flag, you must:
   - quote the exact span you are conflicting with (`source_quote`).
