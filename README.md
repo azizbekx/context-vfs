@@ -78,6 +78,12 @@ The script builds the context base, prints graph/review counts, runs a retrieval
 bash scripts/demo.sh context_base_demo_out
 ```
 
+If you already have an indexed output directory and only want to inspect it without rebuilding or regenerating the VFS:
+
+```bash
+bash scripts/demo.sh --skip-build context_base_out
+```
+
 Then start the product surfaces:
 
 ```bash
