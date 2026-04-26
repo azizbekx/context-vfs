@@ -67,3 +67,6 @@ export const deleteEntity = (entityId: string) =>
 
 export const refreshVfs = () =>
   request(`${API_BASE}/vfs/refresh`, { method: 'POST' });
+
+export const webSearchReview = (reviewId: string) =>
+  request(`${API_BASE}/reviews/${encodeURIComponent(reviewId)}/web-search`);

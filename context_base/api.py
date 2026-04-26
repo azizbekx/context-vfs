@@ -277,6 +277,32 @@ def create_app(db_path: Path, out_dir: Path):
         finally:
             db.close()
 
+    @app.get("/reviews/{review_id:path}/web-search")
+    def review_web_search(review_id: str):
+        db = store()
+        try:
+            review = db.row("SELECT * FROM review_items WHERE id = ?", (review_id,))
+            if not review:
+                raise HTTPException(status_code=404, detail="Review not found")
+            candidates = json.loads(review["candidates_json"] or "[]")
+            values = [c.get("value", "") for c in candidates if c.get("value")]
+            entity = db.row("SELECT type FROM entities WHERE id = ?", (review["entity_id"],))
+            entity_type = entity["type"] if entity else ""
+            from .web_search import build_conflict_query, tavily_search
+            value_a = values[0] if len(values) > 0 else ""
+            value_b = values[1] if len(values) > 1 else ""
+            query = build_conflict_query(
+                review["entity_id"],
+                review["predicate"],
+                value_a,
+                value_b,
+                entity_type,
+            )
+            results = tavily_search(query, max_results=6)
+            return {"query": query, "results": results}
+        finally:
+            db.close()
+
     @app.post("/reviews/{review_id:path}/auto-resolve")
     def auto_resolve(review_id: str):
         db = store()
