@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from 'react';
-import { Hexagon, Search, Folder, FileText, ChevronRight, ChevronDown, AlertTriangle, Plus, Trash2, Save, X, Edit3, Eye, Code, RefreshCw, Database, GitBranch, ClipboardList, ShieldCheck, Route, CheckCircle2 } from 'lucide-react';
+import { Hexagon, Search, Folder, FileText, ChevronRight, ChevronDown, AlertTriangle, Plus, Trash2, Save, X, Edit3, Eye, Code, RefreshCw, Database, GitBranch, ClipboardList, ShieldCheck, Route, CheckCircle2, LayoutDashboard, ShieldAlert } from 'lucide-react';
 import { fetchTree, fetchEntity, fetchNeighbors, fetchFile, search, fetchReviews, resolveReview, createEntity, addFact, editFact, deleteFact, deleteEntity, fetchStats, fetchFactSources } from './api';
 import Dashboard from './components/Dashboard';
 import MarkdownRenderer from './components/MarkdownRenderer';
@@ -123,9 +123,9 @@ export default function App() {
       <header className="topbar">
         <div className="topbar-brand"><Hexagon size={20} />Qontext</div>
         <nav className="topbar-nav">
-          <button className={view === 'dashboard' ? 'active' : ''} onClick={() => setView('dashboard')}>Dashboard</button>
-          <button className={view === 'browser' ? 'active' : ''} onClick={() => setView('browser')}>Context Browser</button>
-          <button className={view === 'reviews' ? 'active' : ''} onClick={() => setView('reviews')}>Reviews</button>
+          <button className={view === 'dashboard' ? 'active' : ''} onClick={() => setView('dashboard')}><LayoutDashboard size={14} />Dashboard</button>
+          <button className={view === 'browser' ? 'active' : ''} onClick={() => setView('browser')}><Folder size={14} />Context Browser</button>
+          <button className={view === 'reviews' ? 'active' : ''} onClick={() => setView('reviews')}><ShieldAlert size={14} />Reviews</button>
         </nav>
         <div className="topbar-stats">
           {stats && <>
