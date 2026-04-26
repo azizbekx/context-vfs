@@ -96,10 +96,12 @@ class GeminiProvider:
         model: str = "gemini-3.1-flash-lite-preview",
         api_key_env: str = "GEMINI_API_KEY",
         temperature: float = 0.1,
+        max_output_tokens: int = 8192,
     ) -> None:
         self.name = model
         self._api_key_env = api_key_env
         self._temperature = temperature
+        self._max_output_tokens = max_output_tokens
 
     def _client(self) -> Any:
         from google import genai  # local import; SDK is optional
@@ -139,6 +141,7 @@ class GeminiProvider:
             temperature=self._temperature,
             response_mime_type="application/json",
             system_instruction=system_instruction or None,
+            max_output_tokens=self._max_output_tokens,
         )
         response = client.models.generate_content(
             model=self.name,

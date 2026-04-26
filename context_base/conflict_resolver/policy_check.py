@@ -31,42 +31,68 @@ You are Qontext-Compliance-LLM, a cross-source incident detector for an
 enterprise context base. You receive three corpora:
 
   POLICIES     - the company's own rules (markdown extracts of policy
-                 documents). Anything an employee or system does that
-                 contradicts a policy rule is a `policy_violation`.
+                 documents).
 
   ORDERS       - customer-specific commitments from order documents
                  (invoices, purchase orders, shipping orders). Pricing,
                  quantities, delivery dates, included/excluded scope.
-                 Anything in the records that contradicts an order is
-                 an `order_contradiction`.
 
   RECORDS      - the surface to scrutinise. Each record has an id, a
-                 type (email / conversation / it_ticket / support_chat)
-                 and a text body.
+                 type (email / conversation / it_ticket / support_chat),
+                 optional metadata such as `thread_id` linking it to
+                 other records in this batch, and a text body.
 
-For every RECORD, decide whether it surfaces an incident against POLICIES
-or ORDERS. Be conservative — flag only when there is *concrete textual
-evidence* of a conflict. Do NOT flag generic complaints, neutral status
-updates, or matters silent on policy/order subject matter.
+You flag four kinds of incident:
 
-When you do flag, you must:
-  - quote the exact span of the policy/order that's being conflicted with
-  - quote the exact span of the record providing the evidence
+  1. `policy_violation`        - a record does or claims something that
+                                  contradicts a POLICY rule.
+
+  2. `order_contradiction`     - a record contradicts a commitment in an
+                                  ORDER (price quoted differently, status
+                                  inconsistent with shipping, etc.).
+
+  3. `internal_inconsistency`  - a single record contradicts itself
+                                  (e.g. subject says "shipped", body
+                                  says "still pending"; resolution
+                                  contradicts the issue description).
+
+  4. `cross_record_conflict`   - two RECORDS in this batch (typically
+                                  sharing a thread_id, conversation_id,
+                                  or referenced customer) make
+                                  contradictory factual claims about
+                                  the same subject. Use the
+                                  `record_id` field for the primary
+                                  record and put the conflicting
+                                  partner's id in `related_record_id`.
+
+Be conservative - flag only when there is *concrete textual evidence*
+of a conflict. Do NOT flag generic complaints, neutral status updates,
+or matters silent on the subject. Quote the exact spans you're relying
+on; do not invent text.
+
+When you flag, you must:
+  - quote the exact span you are conflicting with (`source_quote`).
+    For policy/order incidents, this is from POLICIES or ORDERS. For
+    `internal_inconsistency`, it is the *first* contradicting span
+    inside the same record. For `cross_record_conflict`, it is the
+    contradicting span from the partner record.
+  - quote the exact span of the (primary) record (`record_quote`).
   - choose `severity` ∈ {"low", "medium", "high", "critical"} based on
-    customer impact, regulatory exposure, and reversibility
-  - state `confidence` ∈ [0.0, 1.0] honestly (do NOT inflate)
+    customer impact, regulatory exposure, and reversibility.
+  - state `confidence` ∈ [0.0, 1.0] honestly (do NOT inflate).
 
 OUTPUT STRICTLY VALID JSON. Top level is an object with one key:
 
 {
   "incidents": [
     {
-      "record_id": "<id of the offending record>",
+      "record_id": "<id of the offending (primary) record>",
       "record_type": "email" | "conversation" | "it_ticket" | "support_chat" | "<other>",
-      "incident_type": "policy_violation" | "order_contradiction",
-      "source_doc": "<policy filename or order id>",
-      "source_quote": "<verbatim span from policy/order>",
-      "record_quote": "<verbatim span from the record>",
+      "incident_type": "policy_violation" | "order_contradiction" | "internal_inconsistency" | "cross_record_conflict",
+      "source_doc": "<policy filename / order id / record_id of the partner record / 'self' for internal_inconsistency>",
+      "source_quote": "<verbatim span from policy/order/partner-record/same-record>",
+      "record_quote": "<verbatim span from the (primary) record>",
+      "related_record_id": "<id of the partner record, only for cross_record_conflict; null otherwise>",
       "rule_summary": "<one sentence: the rule or commitment that was violated>",
       "severity": "low" | "medium" | "high" | "critical",
       "confidence": <float 0.0 - 1.0>,
@@ -84,7 +110,7 @@ records or quote spans that are not literally present in the inputs.
 class Incident:
     record_id: str
     record_type: str
-    incident_type: str            # "policy_violation" | "order_contradiction"
+    incident_type: str            # see SYSTEM_PROMPT for the four valid values
     source_doc: str
     source_quote: str
     record_quote: str
@@ -92,6 +118,7 @@ class Incident:
     severity: str                 # "low" | "medium" | "high" | "critical"
     confidence: float
     reasoning: str
+    related_record_id: Optional[str] = None  # set on cross_record_conflict
     raw: dict[str, Any] = field(default_factory=dict)
 
     def as_dict(self) -> dict[str, Any]:
@@ -102,6 +129,7 @@ class Incident:
             "source_doc": self.source_doc,
             "source_quote": self.source_quote,
             "record_quote": self.record_quote,
+            "related_record_id": self.related_record_id,
             "rule_summary": self.rule_summary,
             "severity": self.severity,
             "confidence": round(self.confidence, 3),
@@ -162,15 +190,25 @@ def find_incidents(
          "body": _truncate(o.get("body", ""), max_order_chars)}
         for o in orders
     ])
-    rec_section = _format_section("RECORDS", [
-        {"header": f"id={r.get('id', '?')}  type={r.get('type', '?')}",
-         "body": _truncate(r.get("body", ""), max_record_chars)}
-        for r in records
-    ])
+    rec_items = []
+    for r in records:
+        meta = r.get("meta") or {}
+        meta_bits = "  ".join(f"{k}={v}" for k, v in meta.items() if v not in (None, ""))
+        header = f"id={r.get('id', '?')}  type={r.get('type', '?')}"
+        if meta_bits:
+            header += "  " + meta_bits
+        rec_items.append({
+            "header": header,
+            "body": _truncate(r.get("body", ""), max_record_chars),
+        })
+    rec_section = _format_section("RECORDS", rec_items)
 
     user_msg = (
-        "Find all incidents in RECORDS that conflict with POLICIES or "
-        "ORDERS. Return strict JSON per the system prompt schema.\n\n"
+        "Find all incidents in RECORDS. Look for: policy_violation, "
+        "order_contradiction, internal_inconsistency, and "
+        "cross_record_conflict (use `thread_id` / `conversation_id` / "
+        "`customer_id` in record headers to spot related records). "
+        "Return strict JSON per the system prompt schema.\n\n"
         f"{pol_section}\n\n{ord_section}\n\n{rec_section}"
     )
 
@@ -189,6 +227,7 @@ def find_incidents(
     out: list[Incident] = []
     for it in items:
         try:
+            related = it.get("related_record_id")
             out.append(Incident(
                 record_id=str(it.get("record_id", "")),
                 record_type=str(it.get("record_type", "")),
@@ -196,6 +235,7 @@ def find_incidents(
                 source_doc=str(it.get("source_doc", "")),
                 source_quote=str(it.get("source_quote", "")),
                 record_quote=str(it.get("record_quote", "")),
+                related_record_id=str(related) if related else None,
                 rule_summary=str(it.get("rule_summary", "")),
                 severity=str(it.get("severity", "medium")),
                 confidence=float(it.get("confidence", 0.0)),

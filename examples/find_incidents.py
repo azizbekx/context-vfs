@@ -46,23 +46,27 @@ from context_base.conflict_resolver import (  # noqa: E402
 )
 
 
-# Source descriptor: relative path under --data-dir, id field, body builder.
-# `body` may be a string field name or a callable that takes the record dict.
+# Source descriptor: relative path under --data-dir, id field, body builder,
+# and meta_fields surfaced to the LLM so cross_record_conflict can fire on
+# records that share a thread / conversation / participant.
 RECORD_SOURCES: dict[str, dict] = {
     "emails": {
         "path": "Enterprise_mail_system/emails.json",
         "id_field": "email_id",
         "body": lambda r: f"Subject: {r.get('subject', '')}\n\n{r.get('body', '')}",
+        "meta_fields": ["thread_id", "sender_emp_id", "recipient_emp_id", "date"],
     },
     "conversations": {
         "path": "Collaboration_tools/conversations.json",
         "id_field": "conversation_id",
         "body": "text",
+        "meta_fields": ["sender_emp_id", "recipient_emp_id", "date"],
     },
     "tickets": {
         "path": "IT_Service_Management/it_tickets.json",
         "id_field": "id",
         "body": lambda r: f"Issue: {r.get('Issue', '')}\n\nResolution: {r.get('Resolution', '')}",
+        "meta_fields": ["priority", "raised_by_emp_id", "emp_id", "assigned_date"],
     },
 }
 
@@ -112,6 +116,7 @@ def _load_records(data_dir: Path, source: str, max_records: int) -> list[dict[st
 
     body_spec = descriptor["body"]
     id_field = descriptor["id_field"]
+    meta_fields: list[str] = descriptor.get("meta_fields") or []
 
     out: list[dict[str, str]] = []
     for r in raw[:max_records]:
@@ -119,7 +124,9 @@ def _load_records(data_dir: Path, source: str, max_records: int) -> list[dict[st
         body = (body or "").strip()
         if len(body) < 30:
             continue
+        meta = {k: r.get(k) for k in meta_fields if r.get(k) not in (None, "")}
         out.append({
+            "meta": meta,
             "id": str(r.get(id_field, "")),
             "type": source,
             "body": body,
@@ -139,7 +146,9 @@ def main() -> int:
     parser.add_argument("--records", default="tickets",
                         choices=sorted(RECORD_SOURCES.keys()),
                         help="Which records source to scan (default: tickets)")
-    parser.add_argument("--max-records", type=int, default=50)
+    parser.add_argument("--max-records", type=int, default=20,
+                        help="Cap records per call. Lower for safer demos; "
+                             "raise once a smaller batch round-trips cleanly.")
     parser.add_argument("--max-policies", type=int, default=None)
     parser.add_argument("--max-orders", type=int, default=None)
     parser.add_argument("--provider", choices=["gemini", "ollama"], default="gemini")
