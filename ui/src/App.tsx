@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from 'react';
-import { Hexagon, Search, Folder, FileText, ChevronRight, ChevronDown, AlertTriangle, Plus, Trash2, Save, X, Edit3, Eye, Code, RefreshCw } from 'lucide-react';
+import { Hexagon, Search, Folder, FileText, ChevronRight, ChevronDown, AlertTriangle, Plus, Trash2, Save, X, Edit3, Eye, Code, RefreshCw, Database, GitBranch, ClipboardList, ShieldCheck, Route, CheckCircle2 } from 'lucide-react';
 import { fetchTree, fetchEntity, fetchNeighbors, fetchFile, search, fetchReviews, resolveReview, createEntity, addFact, editFact, deleteFact, deleteEntity, fetchStats, fetchFactSources } from './api';
 import Dashboard from './components/Dashboard';
 import MarkdownRenderer from './components/MarkdownRenderer';
@@ -339,85 +339,131 @@ export default function App() {
 function GraphView({ entity, neighbors, onNodeClick, fileContent, rawMode }: any) {
   if (!entity) return null;
 
-  const graphWidth = Math.max(760, Math.min(1400, 520 + neighbors.length * 56));
-  const graphHeight = Math.max(420, Math.min(900, 360 + neighbors.length * 18));
-  const cx = graphWidth / 2;
-  const cy = graphHeight / 2;
-  const rx = Math.max(240, graphWidth / 2 - 140);
-  const ry = Math.max(135, graphHeight / 2 - 96);
-  const nodePosition = (index: number) => {
-    const angle = (index / neighbors.length) * Math.PI * 2 - Math.PI / 2;
-    return {
-      x: cx + Math.cos(angle) * rx,
-      y: cy + Math.sin(angle) * ry,
-    };
-  };
+  const facts = entity.facts || [];
+  const outgoing = neighbors.filter((n: any) => n.direction === 'outgoing');
+  const incoming = neighbors.filter((n: any) => n.direction === 'incoming');
+  const sourceRefs = Array.from(new Set(
+    facts
+      .map((f: any) => f.dataset_path && f.record_id ? `${f.dataset_path}#${f.record_id}` : f.raw_ref || f.source_id)
+      .filter(Boolean)
+  ));
+  const manualFacts = facts.filter((f: any) => f.extraction_method === 'manual' || f.source_id === 'source:manual');
+  const generatedFacts = facts.filter((f: any) => f.extraction_method !== 'manual' && f.source_id !== 'source:manual');
+  const fieldGroups = buildFactGroups(facts, entity.entity.type);
 
   return (
     <div className="entity-content">
       {fileContent && <div className="doc-card">{rawMode ? <pre className="raw-view">{fileContent}</pre> : <MarkdownRenderer content={fileContent} />}</div>}
-      {neighbors.length > 0 && (
-        <div className="doc-card graph-card">
-          <div className="graph-card-header">Relationship Graph</div>
-          <div className="graph-scroller">
-            <div className="graph-surface" style={{ width: graphWidth, height: graphHeight }}>
-              <svg
-                viewBox={`0 0 ${graphWidth} ${graphHeight}`}
-                className="graph-edges"
-                aria-hidden="true"
-              >
-              {neighbors.map((_n: any, i: number) => {
-                const { x, y } = nodePosition(i);
-                return (
-                  <line
-                    key={i}
-                    x1={cx}
-                    y1={cy}
-                    x2={x}
-                    y2={y}
-                    stroke="#e4e7ec"
-                    strokeWidth="1.5"
-                  />
-                );
-              })}
-              </svg>
-              <div className="graph-center-node" style={{ left: cx, top: cy }}>
-                <div className="name">{entity.entity.name}</div>
-                <div className="type">{entity.entity.type}</div>
-              </div>
-              {neighbors.map((n: any, i: number) => {
-                const { x, y } = nodePosition(i);
-                return (
-                  <div
-                    key={i}
-                    className="graph-neighbor"
-                    onClick={() => onNodeClick(n.entity_id)}
-                    style={{ left: x, top: y }}
-                    title={`${n.name} (${n.relation})`}
-                  >
-                    <div className="name">{n.name}</div>
-                    <div className="type">{n.relation}</div>
+      <div className="doc-card context-map-card">
+        <div className="context-map-header">
+          <div>
+            <div className="context-map-title">Explainable Context Map</div>
+            <div className="context-map-subtitle">Object, relationships, evidence, and provenance for this memory node.</div>
+          </div>
+          <div className="context-map-metrics">
+            <span><GitBranch size={13} />{neighbors.length} links</span>
+            <span><ClipboardList size={13} />{facts.length} facts</span>
+            <span><Database size={13} />{sourceRefs.length} sources</span>
+          </div>
+        </div>
+
+        <div className="context-flow">
+          <section className="context-lane">
+            <div className="lane-title"><Route size={14} />Incoming References</div>
+            {incoming.length ? incoming.slice(0, 8).map((n: any, i: number) => (
+              <RelationshipChip key={i} n={n} onNodeClick={onNodeClick} prefix="referenced by" />
+            )) : <div className="lane-empty">No incoming graph references.</div>}
+          </section>
+
+          <section className="context-object">
+            <div className="object-type">{entity.entity.type}</div>
+            <div className="object-name">{entity.entity.name}</div>
+            <div className="object-id">{entity.entity.id}</div>
+            {entity.entity.summary && <div className="object-summary">{entity.entity.summary}</div>}
+            <div className="object-health">
+              <span><CheckCircle2 size={13} />{generatedFacts.length} generated</span>
+              <span><ShieldCheck size={13} />{manualFacts.length} manual</span>
+            </div>
+          </section>
+
+          <section className="context-lane">
+            <div className="lane-title"><GitBranch size={14} />Outgoing Relationships</div>
+            {outgoing.length ? outgoing.slice(0, 8).map((n: any, i: number) => (
+              <RelationshipChip key={i} n={n} onNodeClick={onNodeClick} />
+            )) : <div className="lane-empty">No outgoing graph relationships.</div>}
+          </section>
+        </div>
+
+        <div className="evidence-grid">
+          {fieldGroups.map(group => (
+            <section className="evidence-panel" key={group.id}>
+              <div className="evidence-panel-title">{group.label}</div>
+              {group.facts.length ? group.facts.slice(0, 6).map((f: any) => (
+                <div className="evidence-row" key={f.id}>
+                  <div className="evidence-key">{f.predicate}</div>
+                  <div className="evidence-value">{truncateFactValue(f.value || f.object_entity_id || '—', 130)}</div>
+                  <div className="evidence-meta">
+                    <span>{Math.round((f.confidence || 0) * 100)}%</span>
+                    <span>{f.extraction_method}</span>
+                    {(f.dataset_path || f.raw_ref) && <span>{sourceLabel(f)}</span>}
                   </div>
-                );
-              })}
-            </div>
+                </div>
+              )) : <div className="lane-empty">No matching facts.</div>}
+            </section>
+          ))}
+        </div>
+
+        <div className="provenance-strip">
+          <div className="provenance-title"><Database size={14} />Source Records</div>
+          <div className="provenance-list">
+            {sourceRefs.slice(0, 10).map((source: any) => <code key={source}>{source}</code>)}
+            {sourceRefs.length > 10 && <span className="source-more">+ {sourceRefs.length - 10} more</span>}
+            {!sourceRefs.length && <span className="lane-empty">No source records linked.</span>}
           </div>
         </div>
-      )}
-      {neighbors.length === 0 && (
-        <div className="doc-card graph-card">
-          <div className="graph-card-header">Relationship Graph</div>
-          <div className="graph-empty">
-            <div className="graph-center-node static">
-              <div className="name">{entity.entity.name}</div>
-              <div className="type">{entity.entity.type}</div>
-            </div>
-            <div className="graph-empty-text">No graph neighbors.</div>
-          </div>
-        </div>
-      )}
+      </div>
     </div>
   );
+}
+
+function RelationshipChip({ n, onNodeClick, prefix }: any) {
+  return (
+    <button className="relationship-chip" onClick={() => onNodeClick(n.entity_id)} title={`${n.relation}: ${n.name}`}>
+      <span className="relationship-name">{n.name}</span>
+      <span className="relationship-meta">{prefix ? `${prefix} ${n.relation}` : n.relation} · {n.type}</span>
+    </button>
+  );
+}
+
+function buildFactGroups(facts: any[], entityType: string) {
+  const staticPredicates = new Set(['name', 'email', 'category', 'department', 'level', 'skills', 'product_name', 'customer_name', 'industry', 'business_type', 'contact_email', 'priority', 'assigned_date']);
+  const procedurePredicates = new Set(['rule', 'policy', 'source_policy', 'trigger', 'responsible_role', 'step_1', 'step_2', 'step_3', 'step_4', 'step_5', 'resolution']);
+  const trajectoryPredicates = new Set(['status', 'issue', 'evidence', 'part_of_project', 'derived_from', 'date', 'deadline', 'review_date', 'date_of_purchase', 'assigned_to', 'raised_by']);
+  const manualPredicates = new Set(['agent_judgement', 'agent_targeted_refresh_check', 'agent_real_task_result', 'agent_task_result', 'human_note', 'judge_note']);
+  const matches = (f: any, predicates: Set<string>) => predicates.has(f.predicate) || [...predicates].some(p => f.predicate.startsWith(`${p}_`));
+  const manual = facts.filter((f: any) => f.extraction_method === 'manual' || f.source_id === 'source:manual' || matches(f, manualPredicates));
+  const procedural = facts.filter((f: any) => matches(f, procedurePredicates) || ['policy', 'process'].includes(entityType));
+  const trajectory = facts.filter((f: any) => matches(f, trajectoryPredicates) || ['ticket', 'task', 'project', 'work_item'].includes(entityType));
+  const profile = facts.filter((f: any) => matches(f, staticPredicates) || (!procedural.includes(f) && !trajectory.includes(f) && !manual.includes(f)));
+  return [
+    { id: 'profile', label: 'Static Business Facts', facts: profile },
+    { id: 'procedure', label: 'Procedural Knowledge', facts: procedural },
+    { id: 'trajectory', label: 'Trajectory / Work State', facts: trajectory },
+    { id: 'manual', label: 'Human & Agent Judgements', facts: manual },
+  ];
+}
+
+function truncateFactValue(value: string, limit: number) {
+  const text = String(value);
+  return text.length > limit ? `${text.slice(0, limit - 1)}…` : text;
+}
+
+function sourceLabel(f: any) {
+  if (f.dataset_path && f.record_id) {
+    const parts = f.dataset_path.split('/');
+    return `${parts[parts.length - 1]}#${f.record_id}`;
+  }
+  return f.raw_ref || f.source_id;
 }
 
 /* ── Tree Node ── */

@@ -123,7 +123,15 @@ def create_app(db_path: Path, out_dir: Path):
             if not row:
                 raise HTTPException(status_code=404, detail="Entity not found")
             facts = db.rows(
-                "SELECT * FROM facts WHERE subject_id = ? AND status IN ('generated', 'confirmed') LIMIT 100",
+                """
+                SELECT f.*, s.dataset_path, s.record_id, s.raw_ref
+                FROM facts f
+                JOIN source_records s ON s.id = f.source_id
+                WHERE f.subject_id = ?
+                  AND f.status IN ('generated', 'confirmed')
+                ORDER BY f.predicate, f.confidence DESC
+                LIMIT 160
+                """,
                 (entity_id,),
             )
             return {"entity": dict(row), "facts": [dict(item) for item in facts]}
