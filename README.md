@@ -113,6 +113,15 @@ The current prebuilt context base contains approximately:
 
 Counts may change after rebuilding from modified source data.
 
+Use the provided dataset instead of building a new one:
+
+- Download it from
+  [Google Drive](https://drive.google.com/file/d/15tltMCY-2B4k0lDLuBBn7PGhlpiAkMaA/view?usp=drive_link).
+- Extract or place the downloaded dataset folders directly in the repository
+  root.
+- Keep the expected source folders and files at the repository root so
+  `dataset_schema.json` can map records into the context base.
+
 ## Core Capabilities
 
 ### Virtual File System
@@ -242,25 +251,33 @@ npm install
 cd ..
 ```
 
+### 4. Download The Dataset
+
+Download the Qontext simulated enterprise dataset from
+[Google Drive](https://drive.google.com/file/d/15tltMCY-2B4k0lDLuBBn7PGhlpiAkMaA/view?usp=drive_link)
+and extract or place its folders directly in the repository root. Use this
+dataset as the source input; do not create or synthesize a new dataset for the
+standard demo.
+
 ## Build The Context Base
 
-Build from the dataset into `context_base_out/`:
+Build from the downloaded dataset into `context_base_out/`:
 
 ```bash
-python3 context_base.py build --force
+python3 context_base.py build --dataset-dir . --force
 ```
 
 Build with Gemini-assisted extraction, embeddings, and conflict checks:
 
 ```bash
-python3 context_base.py build --force --use-llm
+python3 context_base.py build --dataset-dir . --force --use-llm
 ```
 
 Build into a custom output directory:
 
 ```bash
 python3 context_base.py build \
-  --dataset-dir dataset \
+  --dataset-dir . \
   --schema dataset_schema.json \
   --out-dir context_base_demo_out \
   --force
@@ -565,7 +582,8 @@ python3 context_base.py entity employee:emp_1226 --out-dir context_base_out
 ## Known Notes
 
 - The repository includes a prebuilt `context_base_out/` for fast judging. It can
-  be regenerated from the dataset with `python3 context_base.py build --force`.
+  be regenerated from the downloaded dataset with
+  `python3 context_base.py build --dataset-dir . --force`.
 - External MCP clients need Python 3.10+ because of the `mcp` package.
 - LLM-powered features require `GEMINI_API_KEY`; deterministic functionality
   works without it.
