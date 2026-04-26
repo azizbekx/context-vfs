@@ -3,8 +3,9 @@ import { Hexagon, Search, Folder, FileText, ChevronRight, ChevronDown, AlertTria
 import { fetchTree, fetchEntity, fetchNeighbors, fetchFile, search, fetchReviews, resolveReview, createEntity, addFact, editFact, deleteFact, deleteEntity, fetchStats, fetchFactSources } from './api';
 import Dashboard from './components/Dashboard';
 import MarkdownRenderer from './components/MarkdownRenderer';
+import ReviewQueue from './components/ReviewQueue';
 
-type View = 'dashboard' | 'browser';
+type View = 'dashboard' | 'browser' | 'reviews';
 
 function buildTree(paths: string[]) {
   const root: any = { id: 'root', name: 'company', type: 'folder', children: [], isOpen: true };
@@ -124,6 +125,7 @@ export default function App() {
         <nav className="topbar-nav">
           <button className={view === 'dashboard' ? 'active' : ''} onClick={() => setView('dashboard')}>Dashboard</button>
           <button className={view === 'browser' ? 'active' : ''} onClick={() => setView('browser')}>Context Browser</button>
+          <button className={view === 'reviews' ? 'active' : ''} onClick={() => setView('reviews')}>Reviews</button>
         </nav>
         <div className="topbar-stats">
           {stats && <>
@@ -135,7 +137,7 @@ export default function App() {
       </header>
 
       <div className="shell-body">
-        {view === 'dashboard' ? <Dashboard /> : (
+        {view === 'dashboard' ? <Dashboard /> : view === 'reviews' ? <ReviewQueue /> : (
           <div className="layout-3col">
             {/* Sidebar */}
             <aside className="col-sidebar">

@@ -859,3 +859,383 @@ textarea { height: auto; min-height: 64px; padding: 8px 10px; resize: vertical; 
   .col-sidebar { max-height: 40vh; }
   .topbar-stats { display: none; }
 }
+
+/* ════════════════════════════════════════════════════════════════════
+   Review Queue page — dedicated screen for the open review_items.
+   Mounts at view === 'reviews' in App.tsx.
+   Uses the existing palette (--bg, --panel, --ink, --muted, --line,
+   --accent, --warning) so it sits inside the chrome without clashing.
+   All classes are .rq-* so they can't collide with the rest of ui/.
+   ════════════════════════════════════════════════════════════════════ */
+
+.rq-shell {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  background: var(--bg);
+}
+
+/* — Queue sidebar — */
+.rq-queue {
+  width: 320px;
+  background: var(--panel);
+  border-right: 1px solid var(--line);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.rq-queue-header {
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--line);
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+}
+
+.rq-queue-list {
+  flex: 1;
+  overflow-y: auto;
+}
+
+.rq-queue-empty {
+  padding: 20px 16px;
+  font-size: 13px;
+  color: var(--muted);
+  line-height: 1.5;
+}
+
+.rq-queue-item {
+  display: block;
+  width: 100%;
+  text-align: left;
+  border: none;
+  background: transparent;
+  border-bottom: 1px solid var(--line-soft);
+  padding: 10px 16px;
+  cursor: pointer;
+  font-family: inherit;
+}
+.rq-queue-item:hover { background: var(--line-soft); }
+.rq-queue-item.is-active {
+  background: var(--accent-soft);
+  border-left: 3px solid var(--accent);
+  padding-left: 13px;
+}
+
+.rq-queue-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  font-size: 11px;
+  margin-bottom: 4px;
+  gap: 8px;
+}
+.rq-queue-id {
+  font-family: var(--mono);
+  color: var(--muted);
+}
+.rq-conflict-type {
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--warning);
+  font-weight: 600;
+}
+.rq-queue-pred {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--ink);
+  margin-bottom: 2px;
+  word-break: break-word;
+}
+.rq-queue-entity {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--muted);
+  word-break: break-all;
+}
+.rq-queue-meta {
+  font-size: 11px;
+  color: var(--muted);
+  flex-shrink: 0;
+}
+
+/* — Detail pane — */
+.rq-detail {
+  flex: 1;
+  overflow-y: auto;
+  background: var(--bg);
+}
+.rq-detail-inner {
+  padding: 24px 32px 48px;
+  max-width: 1100px;
+}
+.rq-empty {
+  padding: 48px;
+  text-align: center;
+  color: var(--muted);
+  font-size: 14px;
+}
+
+.rq-error {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 16px 24px;
+  padding: 10px 14px;
+  background: var(--danger-soft);
+  border: 1px solid var(--danger);
+  border-radius: var(--radius);
+  color: var(--danger);
+  font-size: 13px;
+}
+
+.rq-detail-header {
+  margin-bottom: 24px;
+  padding-bottom: 16px;
+  border-bottom: 1px solid var(--line);
+}
+.rq-detail-meta {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+  flex-wrap: wrap;
+  font-size: 11px;
+  color: var(--muted);
+  font-family: var(--mono);
+}
+.rq-conflict-type-strong {
+  color: var(--warning);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  font-size: 10px;
+}
+.rq-pred-tag {
+  color: var(--ink);
+  font-weight: 500;
+}
+.rq-meta-sep { color: var(--line); }
+.rq-detail-entity {
+  font-family: var(--mono);
+  font-size: 20px;
+  font-weight: 600;
+  color: var(--ink);
+  margin: 10px 0 0;
+  word-break: break-all;
+}
+
+.rq-suggestion {
+  margin-top: 12px;
+  padding: 10px 14px;
+  background: var(--accent-soft);
+  border-left: 3px solid var(--accent);
+  border-radius: 4px;
+  font-size: 13px;
+  color: var(--accent-dark);
+  display: flex;
+  gap: 12px;
+  align-items: baseline;
+}
+
+.rq-section-label {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--muted);
+  margin: 24px 0 12px;
+  font-family: var(--font);
+}
+
+.rq-label {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.rq-count {
+  font-size: 12px;
+  color: var(--muted);
+  margin-left: auto;
+  margin-right: 8px;
+}
+
+/* — Cards grid — */
+.rq-cards-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+  align-items: stretch;
+}
+@media (max-width: 860px) {
+  .rq-cards-grid { grid-template-columns: 1fr; }
+}
+
+.rq-card {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  box-shadow: var(--shadow-sm);
+}
+.rq-card--anchor {
+  border-color: var(--accent);
+}
+.rq-card--variant {
+  border-color: var(--warning);
+  background: var(--warning-soft);
+}
+
+.rq-card-header {
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--line);
+  background: var(--line-soft);
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+}
+.rq-card--variant .rq-card-header {
+  background: rgba(245, 158, 11, 0.12);
+  border-bottom-color: var(--warning);
+}
+.rq-card-source {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-family: var(--mono);
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--ink);
+  word-break: break-all;
+  min-width: 0;
+}
+.rq-card-source span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.rq-role-badge {
+  font-size: 10px;
+  padding: 2px 8px;
+  border-radius: 3px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  font-weight: 600;
+  flex-shrink: 0;
+}
+.rq-role-anchor { background: var(--accent-soft); color: var(--accent-dark); }
+.rq-role-variant { background: var(--warning); color: #fff; }
+
+.rq-card-body {
+  padding: 14px;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+}
+
+.rq-field-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  margin-bottom: 10px;
+  gap: 8px;
+}
+.rq-field-label {
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+.rq-confidence {
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.rq-value {
+  font-family: var(--mono);
+  font-size: 18px;
+  font-weight: 500;
+  color: var(--ink);
+  word-break: break-word;
+  margin-bottom: 12px;
+}
+.rq-card--variant .rq-value {
+  color: #b45309;
+}
+
+.rq-snippet-wrap {
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  padding: 8px 10px;
+  margin-bottom: 12px;
+}
+.rq-snippet-text {
+  font-family: var(--mono);
+  font-size: 11px;
+  line-height: 1.6;
+  color: var(--muted);
+  word-break: break-word;
+}
+
+.rq-card-foot {
+  margin-top: auto;
+  padding-top: 10px;
+  border-top: 1px solid var(--line-soft);
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+}
+.rq-card-foot-meta {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--muted);
+  word-break: break-all;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* — Additional candidates list (3+) — */
+.rq-others-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.rq-other-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 10px 14px;
+  gap: 12px;
+}
+.rq-other-value {
+  font-family: var(--mono);
+  font-size: 13px;
+  color: var(--ink);
+  word-break: break-word;
+}
+.rq-other-meta {
+  font-size: 11px;
+  color: var(--muted);
+  margin-top: 2px;
+}
+
+/* — Responsive — */
+@media (max-width: 768px) {
+  .rq-shell { flex-direction: column; }
+  .rq-queue { width: 100%; max-height: 40vh; border-right: none; border-bottom: 1px solid var(--line); }
+  .rq-detail-inner { padding: 16px; }
+}
