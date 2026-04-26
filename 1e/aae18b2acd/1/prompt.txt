@@ -1,0 +1,5 @@
+i want to add a tool to llm resolve to search web to get more context for the llm to deal with the conflict anf for thh human reviewer dashboard add a button to search the web for relavent details for that particular case
+
+---
+
+pull from main and then do it

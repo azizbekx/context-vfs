@@ -1,0 +1,68 @@
+{
+  "cli_version": "0.5.6",
+  "checkpoint_id": "1eaae18b2acd",
+  "session_id": "aebb6282-0d87-4c8a-a6ba-c460e20d934d",
+  "strategy": "manual-commit",
+  "created_at": "2026-04-26T11:22:47.363144Z",
+  "branch": "tavily-search",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "context_base/api.py",
+    "context_base/llm.py",
+    "context_base/web_search.py",
+    "requirements.txt",
+    "ui/src/api.ts",
+    "ui/src/components/ReviewQueue.tsx",
+    "ui/src/index.css"
+  ],
+  "agent": "Claude Code",
+  "model": "",
+  "turn_id": "02a4aacbd007",
+  "token_usage": {
+    "input_tokens": 98,
+    "cache_creation_tokens": 224124,
+    "cache_read_tokens": 2855816,
+    "output_tokens": 15335,
+    "api_call_count": 53
+  },
+  "session_metrics": {
+    "turn_count": 1
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-04-26T11:22:47.354239Z",
+    "agent_lines": 239,
+    "agent_removed": 11,
+    "human_added": 3,
+    "human_modified": 0,
+    "human_removed": 0,
+    "total_committed": 242,
+    "total_lines_changed": 253,
+    "agent_percentage": 98.81422924901186,
+    "metric_version": 2
+  },
+  "prompt_attributions": [
+    {
+      "checkpoint_number": 1,
+      "user_lines_added": 121,
+      "user_lines_removed": 0,
+      "agent_lines_added": 0,
+      "agent_lines_removed": 0,
+      "user_added_per_file": {
+        ".claude/agents/entire-search.md": 25,
+        ".claude/settings.json": 84,
+        ".claude/settings.local.json": 10,
+        ".env": 2
+      }
+    },
+    {
+      "checkpoint_number": 2,
+      "user_lines_added": 3,
+      "user_lines_removed": 0,
+      "agent_lines_added": 239,
+      "agent_lines_removed": 11,
+      "user_added_per_file": {
+        ".gitignore": 3
+      }
+    }
+  ]
+}
