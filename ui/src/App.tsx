@@ -1,9 +1,11 @@
-import { useState, useEffect, useCallback } from 'react';
-import { Hexagon, Search, Folder, FileText, ChevronRight, ChevronDown, AlertTriangle, Plus, Trash2, Save, X, Edit3, Eye, Code, RefreshCw, Database, GitBranch, ClipboardList, ShieldCheck, Route, CheckCircle2 } from 'lucide-react';
+import { useState, useEffect, useCallback, useRef } from 'react';
+import { Hexagon, Search, Folder, FileText, ChevronRight, ChevronDown, AlertTriangle, Plus, Trash2, Save, X, Edit3, Eye, Code, RefreshCw, Database, GitBranch, ClipboardList, ShieldCheck, Route, CheckCircle2, LayoutDashboard, ShieldAlert, Network, GitFork, Sun, Moon } from 'lucide-react';
 import { fetchTree, fetchEntity, fetchNeighbors, fetchFile, search, fetchReviews, resolveReview, createEntity, addFact, editFact, deleteFact, deleteEntity, fetchStats, fetchFactSources } from './api';
 import Dashboard from './components/Dashboard';
 import MarkdownRenderer from './components/MarkdownRenderer';
 import ReviewQueue from './components/ReviewQueue';
+import NetworkGraph from './components/NetworkGraph';
+import DirectedGraph from './components/DirectedGraph';
 
 type View = 'dashboard' | 'browser' | 'reviews';
 
@@ -30,6 +32,21 @@ function buildTree(paths: string[]) {
   return root.children;
 }
 
+function extractNameFromContent(content: string): string | null {
+  if (!content) return null;
+  const h1 = content.match(/^#\s+(.+)$/m);
+  if (h1) return h1[1].trim().slice(0, 40);
+  const bold = content.match(/\*\*[Nn]ame\*\*[:\s]+([^\n*]+)/);
+  if (bold) return bold[1].trim().slice(0, 40);
+  const nameField = content.slice(0, 500).match(/^[Nn]ame[:\s]+(.+)$/m);
+  if (nameField) return nameField[1].trim().slice(0, 40);
+  return null;
+}
+
+function treeLabel(str: string, max = 36): string {
+  return str.length > max ? str.slice(0, max - 1) + '…' : str;
+}
+
 export default function App() {
   const [view, setView] = useState<View>('browser');
   const [tree, setTree] = useState<any[]>([]);
@@ -52,6 +69,13 @@ export default function App() {
   const [err, setErr] = useState<string | null>(null);
   const [sourcePanel, setSourcePanel] = useState<any>(null);
   const [stats, setStats] = useState<any>(null);
+  const [entityNames, setEntityNames] = useState<Record<string, string>>({});
+  const [contentTab, setContentTab] = useState<'details' | 'graph' | 'directed'>('details');
+  const [theme, setTheme] = useState<'dark' | 'light'>(() => {
+    const stored = localStorage.getItem('qontext-theme');
+    return stored === 'light' ? 'light' : 'dark';
+  });
+  const entityNamesRef = useRef<Record<string, string>>({});
 
   const refresh = useCallback(() => {
     fetchTree().then(d => d?.files && setTree(buildTree(d.files))).catch(() => {});
@@ -60,6 +84,11 @@ export default function App() {
   }, []);
 
   useEffect(() => { refresh(); }, [refresh]);
+
+  useEffect(() => {
+    document.documentElement.setAttribute('data-theme', theme);
+    localStorage.setItem('qontext-theme', theme);
+  }, [theme]);
 
   const loadEntity = async (id: string) => {
     setLoading(true); setFileContent(null); setErr(null);
@@ -71,7 +100,7 @@ export default function App() {
   };
 
   const selectNode = async (node: any) => {
-    setSelectedNode(node); setEntity(null); setNeighbors([]); setFileContent(null); setErr(null); setRawMode(false);
+    setSelectedNode(node); setEntity(null); setNeighbors([]); setFileContent(null); setErr(null); setRawMode(false); setContentTab('details');
     if (node.type === 'file' && node.originalPath) {
       setLoading(true);
       try {
@@ -90,6 +119,23 @@ export default function App() {
   };
 
   const clearSearch = () => { setQuery(''); setResults([]); setHasSearched(false); setSideTab('files'); };
+
+  const resolveFileNames = useCallback(async (fileNodes: any[]) => {
+    const toFetch = fileNodes.filter(n => n.originalPath && entityNamesRef.current[n.id] === undefined);
+    if (!toFetch.length) return;
+    toFetch.forEach(n => { entityNamesRef.current[n.id] = ''; }); // mark in-flight
+    const updates: Record<string, string> = {};
+    await Promise.allSettled(
+      toFetch.slice(0, 50).map(async n => {
+        try {
+          const f = await fetchFile(n.originalPath);
+          const name = extractNameFromContent(f.content);
+          if (name) { updates[n.id] = name; entityNamesRef.current[n.id] = name; }
+        } catch { /* fall back to raw filename */ }
+      })
+    );
+    if (Object.keys(updates).length) setEntityNames(prev => ({ ...prev, ...updates }));
+  }, []);
 
   const handleResolve = async (rid: string, choice: string) => {
     try { await resolveReview(rid, choice); refresh(); if (entity) loadEntity(entity.entity.id); }
@@ -123,9 +169,9 @@ export default function App() {
       <header className="topbar">
         <div className="topbar-brand"><Hexagon size={20} />Qontext</div>
         <nav className="topbar-nav">
-          <button className={view === 'dashboard' ? 'active' : ''} onClick={() => setView('dashboard')}>Dashboard</button>
-          <button className={view === 'browser' ? 'active' : ''} onClick={() => setView('browser')}>Context Browser</button>
-          <button className={view === 'reviews' ? 'active' : ''} onClick={() => setView('reviews')}>Reviews</button>
+          <button className={view === 'dashboard' ? 'active' : ''} onClick={() => setView('dashboard')}><LayoutDashboard size={14} />Dashboard</button>
+          <button className={view === 'browser' ? 'active' : ''} onClick={() => setView('browser')}><Folder size={14} />Context Browser</button>
+          <button className={view === 'reviews' ? 'active' : ''} onClick={() => setView('reviews')}><ShieldAlert size={14} />Reviews</button>
         </nav>
         <div className="topbar-stats">
           {stats && <>
@@ -133,6 +179,13 @@ export default function App() {
             <span className="topbar-stat"><strong>{stats.facts?.toLocaleString()}</strong> facts</span>
             {stats.open_reviews > 0 && <span className="review-badge"><AlertTriangle size={12} />{stats.open_reviews} conflicts</span>}
           </>}
+          <button
+            className="theme-toggle"
+            onClick={() => setTheme(t => t === 'dark' ? 'light' : 'dark')}
+            title={`Switch to ${theme === 'dark' ? 'light' : 'dark'} mode`}
+          >
+            {theme === 'dark' ? <Sun size={16} /> : <Moon size={16} />}
+          </button>
         </div>
       </header>
 
@@ -156,7 +209,7 @@ export default function App() {
               </div>
               <div className="sidebar-list">
                 {sideTab === 'files' ? (
-                  tree.map(n => <TreeNode key={n.id} node={n} level={0} onSelect={selectNode} selectedId={selectedNode?.id} />)
+                  tree.map(n => <TreeNode key={n.id} node={n} level={0} onSelect={selectNode} selectedId={selectedNode?.id} entityNames={entityNames} onExpandFolder={resolveFileNames} />)
                 ) : (
                   searching ? <div className="loading-center"><div className="spinner" /></div> :
                   results.length === 0 && hasSearched ? <div style={{ padding: 16, fontSize: 13, color: 'var(--muted)' }}>No results found.</div> :
@@ -175,7 +228,14 @@ export default function App() {
               <div className="main-toolbar">
                 <Breadcrumb path={selectedNode?.id ?? null} />
                 <div className="main-toolbar-actions">
-                  {fileContent && <>
+                  {entity && (
+                    <div className="content-tab-toggle">
+                      <button className={`content-tab-btn ${contentTab === 'details' ? 'active' : ''}`} onClick={() => setContentTab('details')}><ClipboardList size={13} />Details</button>
+                      <button className={`content-tab-btn ${contentTab === 'graph' ? 'active' : ''}`} onClick={() => setContentTab('graph')}><Network size={13} />Graph</button>
+                      <button className={`content-tab-btn ${contentTab === 'directed' ? 'active' : ''}`} onClick={() => setContentTab('directed')}><GitFork size={13} />Directed</button>
+                    </div>
+                  )}
+                  {fileContent && contentTab === 'details' && <>
                     <button className={`btn-sm ${!rawMode ? 'btn-primary' : ''}`} onClick={() => setRawMode(false)}><Eye size={13} /> Preview</button>
                     <button className={`btn-sm ${rawMode ? 'btn-primary' : ''}`} onClick={() => setRawMode(true)}><Code size={13} /> Raw</button>
                   </>}
@@ -183,12 +243,16 @@ export default function App() {
                   <button className="btn-sm btn-primary" onClick={() => setShowCreateModal(true)}><Plus size={13} /> Entity</button>
                 </div>
               </div>
-              <div className="main-body">
+              <div className={`main-body ${(contentTab === 'graph' || contentTab === 'directed') && entity ? 'main-body--graph' : ''}`}>
                 {loading ? <div className="loading-center"><div className="spinner" /></div> :
-                 fileContent && !entity ? (
+                 contentTab === 'graph' && entity ? (
+                   <NetworkGraph entity={entity} neighbors={neighbors} onNodeClick={loadEntity} />
+                 ) : contentTab === 'directed' && entity ? (
+                   <DirectedGraph entity={entity} neighbors={neighbors} onNodeClick={loadEntity} />
+                 ) : fileContent && !entity ? (
                    <div className="doc-card">{rawMode ? <pre className="raw-view">{fileContent}</pre> : <MarkdownRenderer content={fileContent} />}</div>
                  ) : entity ? (
-                   <GraphView entity={entity} neighbors={neighbors} onNodeClick={loadEntity} fileContent={fileContent} rawMode={rawMode} />
+                   <DetailsView entity={entity} neighbors={neighbors} onNodeClick={loadEntity} fileContent={fileContent} rawMode={rawMode} />
                  ) : (
                    <div className="empty-state"><Folder size={36} /><p>Select a file from the VFS or search for an entity to begin.</p></div>
                  )}
@@ -316,7 +380,7 @@ export default function App() {
       </div>
 
       {err && (
-        <div style={{ position: 'fixed', bottom: 16, left: '50%', transform: 'translateX(-50%)', background: '#dc2626', color: '#fff', padding: '8px 16px', borderRadius: 8, fontSize: 13, display: 'flex', gap: 10, alignItems: 'center', zIndex: 100 }}>
+        <div style={{ position: 'fixed', bottom: 16, left: '50%', transform: 'translateX(-50%)', background: 'var(--danger)', color: '#fff', padding: '8px 16px', borderRadius: 8, fontSize: 13, display: 'flex', gap: 10, alignItems: 'center', zIndex: 100, boxShadow: '0 4px 20px rgba(0,0,0,.6)' }}>
           {err} <button onClick={() => setErr(null)} style={{ background: 'none', border: 'none', color: '#fff', cursor: 'pointer' }}><X size={14} /></button>
         </div>
       )}
@@ -337,8 +401,8 @@ export default function App() {
   );
 }
 
-/* ── Graph View ── */
-function GraphView({ entity, neighbors, onNodeClick, fileContent, rawMode }: any) {
+/* ── Details View (was GraphView) ── */
+function DetailsView({ entity, neighbors, onNodeClick, fileContent, rawMode }: any) {
   if (!entity) return null;
 
   const facts = entity.facts || [];
@@ -485,22 +549,73 @@ function Breadcrumb({ path }: { path: string | null }) {
 }
 
 /* ── Tree Node ── */
-function TreeNode({ node, level, onSelect, selectedId }: any) {
+function TreeNode({ node, level, onSelect, selectedId, entityNames, onExpandFolder }: any) {
   const [open, setOpen] = useState(node.isOpen || false);
   const isFolder = node.type === 'folder';
   const LIMIT = 100;
+
+  const rawId = node.name.replace(/\.md$/, '');
+  const resolved = entityNames?.[node.id];
+  const primaryLabel = resolved || rawId;
+  const showRawId = !!(resolved && resolved !== rawId);
+
+  const handleClick = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    if (isFolder) {
+      const next = !open;
+      setOpen(next);
+      if (next && node.children && onExpandFolder) {
+        onExpandFolder(node.children.filter((c: any) => c.type === 'file'));
+      }
+    } else {
+      onSelect(node);
+    }
+  };
+
   return (
     <div>
-      <div className={`tree-item ${node.id === selectedId ? 'active' : ''}`} style={{ paddingLeft: level * 16 + 8 }}
-        onClick={e => { e.stopPropagation(); isFolder ? setOpen(!open) : onSelect(node); }}>
-        {isFolder ? (open ? <ChevronDown size={14} /> : <ChevronRight size={14} />) : <span style={{ width: 14 }} />}
-        {isFolder ? <Folder size={14} color="var(--accent)" /> : <FileText size={14} color="var(--muted)" />}
-        <span className="tree-label" title={node.name}>{node.name}</span>
+      <div
+        className={`tree-item ${node.id === selectedId ? 'active' : ''}`}
+        style={{ paddingLeft: level * 16 + 8 }}
+        onClick={handleClick}
+      >
+        <span className="tree-item-toggle">
+          {isFolder ? (open ? <ChevronDown size={13} /> : <ChevronRight size={13} />) : null}
+        </span>
+        {isFolder
+          ? <Folder size={14} style={{ color: 'var(--accent)', flexShrink: 0 }} />
+          : <FileText size={14} style={{ color: 'var(--muted)', flexShrink: 0 }} />
+        }
+        <span className="tree-item-name">
+          <span className="tree-item-primary">{treeLabel(primaryLabel)}</span>
+          {showRawId && <span className="tree-item-rawid">{rawId}</span>}
+        </span>
+        {isFolder && (node.children?.length ?? 0) > 0 && (
+          <span className="tree-item-count">{node.children.length}</span>
+        )}
       </div>
-      {isFolder && open && node.children && <>
-        {node.children.slice(0, LIMIT).map((c: any) => <TreeNode key={c.id} node={c} level={level + 1} onSelect={onSelect} selectedId={selectedId} />)}
-        {node.children.length > LIMIT && <div className="tree-more" style={{ paddingLeft: (level + 1) * 16 + 8 }}>+ {node.children.length - LIMIT} more</div>}
-      </>}
+
+      {isFolder && (
+        <div
+          className={`tree-children ${open ? 'is-open' : ''}`}
+          style={{ '--guide-left': `${level * 16 + 20}px` } as React.CSSProperties}
+        >
+          <div className="tree-children-inner">
+            {open && node.children?.slice(0, LIMIT).map((c: any) => (
+              <TreeNode
+                key={c.id} node={c} level={level + 1}
+                onSelect={onSelect} selectedId={selectedId}
+                entityNames={entityNames} onExpandFolder={onExpandFolder}
+              />
+            ))}
+            {open && (node.children?.length ?? 0) > LIMIT && (
+              <div className="tree-more" style={{ paddingLeft: (level + 1) * 16 + 8 }}>
+                + {node.children.length - LIMIT} more
+              </div>
+            )}
+          </div>
+        </div>
+      )}
     </div>
   );
 }

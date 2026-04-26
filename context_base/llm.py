@@ -127,6 +127,7 @@ def resolve_conflict(
     source_b: str,
     confidence_b: float,
     date_b: str,
+    web_search: bool = True,
 ) -> dict[str, Any]:
     """Ask the LLM to analyze a fact conflict and return a structured resolution.
 
@@ -137,7 +138,17 @@ def resolve_conflict(
         conflict_category: str
         confidence: float
         human_summary: str | None
+        web_results: list[dict] | None  (only when web_search=True)
     """
+    web_results: list[dict] = []
+    web_context_block = ""
+    if web_search:
+        from .web_search import build_conflict_query, format_web_context, tavily_search
+        query = build_conflict_query(entity_id, predicate, value_a, value_b, entity_type)
+        web_results = tavily_search(query, max_results=4)
+        if web_results:
+            web_context_block = "\n\n" + format_web_context(web_results)
+
     prompt = (
         "You are an enterprise data conflict resolver for a company knowledge base.\n\n"
         "CONFLICT:\n"
@@ -150,8 +161,9 @@ def resolve_conflict(
         f'VALUE B: "{value_b}"\n'
         f"  Source: {source_b}\n"
         f"  Confidence: {confidence_b}\n"
-        f"  Observed: {date_b}\n\n"
-        "ANALYSIS REQUIRED:\n"
+        f"  Observed: {date_b}\n"
+        + web_context_block
+        + "\n\nANALYSIS REQUIRED:\n"
         "1. Are these values semantically identical (synonyms, abbreviations, formatting differences)?\n"
         "2. Does one source clearly supersede the other (newer version, higher authority system)?\n"
         "3. Could both be valid at different points in time (temporal change, e.g. HQ moved)?\n"
@@ -194,13 +206,13 @@ def resolve_conflict(
     )
     try:
         result = _parse_json_response(response.text)
-        # Validate required keys
         result.setdefault("resolution", "needs_human_review")
         result.setdefault("winner", None)
         result.setdefault("reason", "LLM could not determine a reason.")
         result.setdefault("conflict_category", "genuine_contradiction")
         result.setdefault("confidence", 0.5)
         result.setdefault("human_summary", None)
+        result["web_results"] = web_results or None
         return result
     except (json.JSONDecodeError, Exception):
         return {
@@ -215,4 +227,5 @@ def resolve_conflict(
                 f"Source B ({source_b}) says '{value_b}'. "
                 "Please verify which is current."
             ),
+            "web_results": web_results or None,
         }
