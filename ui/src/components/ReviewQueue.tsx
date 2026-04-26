@@ -2,35 +2,40 @@ import { useState, useEffect, useCallback, useMemo } from 'react';
 import {
   AlertTriangle,
   ChevronRight,
+  ExternalLink,
   FileText,
   RefreshCw,
   X,
   Save,
 } from 'lucide-react';
-import { fetchReviews, resolveReview } from '../api';
+import { fetchReviews, resolveReview, fetchFactSources } from '../api';
 
 /**
  * Dedicated Review Queue page. Renders one row per open review_items
  * record, with a 2-column source-card detail per selected review.
  * Drives /reviews and /reviews/{id}/resolve only — no other endpoints.
  *
- * Schema reminder (from context_base/storage.py):
+ * Schema (from context_base/storage.py + context_base/ingest.py):
  *   review_items: id, entity_id, conflict_type, predicate,
  *                 candidates_json, suggested_resolution, status,
  *                 created_at, resolved_at, resolution
- *   candidate    : { choice_id, value, confidence, source_id?, snippet? }
+ *   candidate    : { choice_id, fact_id, value, confidence,
+ *                    source: "<dataset_path>#<record_id>" }
  *
  * Visual style follows the existing ui/ design system (light theme,
  * Inter body / JetBrains Mono mono, --accent teal anchor, --warning
- * amber variant) — see .rq-* block in src/index.css.
+ * amber variant) — see .rq-* block in src/index.css. The source-detail
+ * drawer reuses the existing .source-panel class shared with App.tsx.
  */
 
 interface Candidate {
   choice_id: string;
+  fact_id?: string | null;
   value?: string;
   object_entity_id?: string;
   confidence?: number;
-  source_id?: string;
+  /** Format: "<dataset_path>#<record_id>" (see ingest.py l.730) */
+  source?: string;
   snippet?: string;
 }
 
@@ -47,6 +52,16 @@ interface ReviewItem {
   resolution?: string | null;
 }
 
+interface ReviewQueueProps {
+  /** Optional: handler to switch to the Browser view and open an entity.
+   *  When omitted, the entity_id heading renders as plain text. */
+  onNavigateToEntity?: (entityId: string) => void;
+}
+
+/* ──────────────────────────────────────────────────────────────────── */
+/* Helpers                                                               */
+/* ──────────────────────────────────────────────────────────────────── */
+
 function parseCandidates(raw: string): Candidate[] {
   try {
     const arr = JSON.parse(raw);
@@ -54,6 +69,24 @@ function parseCandidates(raw: string): Candidate[] {
   } catch {
     return [];
   }
+}
+
+interface ParsedSource {
+  datasetPath: string;
+  recordId: string | null;
+  raw: string;
+}
+
+/** "Human_Resource_Management/Employees#emp_42" → split. */
+function parseSource(source?: string): ParsedSource | null {
+  if (!source) return null;
+  const idx = source.indexOf('#');
+  if (idx < 0) return { datasetPath: source, recordId: null, raw: source };
+  return {
+    datasetPath: source.slice(0, idx),
+    recordId: source.slice(idx + 1),
+    raw: source,
+  };
 }
 
 function formatTimestamp(iso?: string | null): string {
@@ -69,13 +102,24 @@ function formatTimestamp(iso?: string | null): string {
   });
 }
 
-export default function ReviewQueue() {
+function reviewVfsPath(reviewId: string): string {
+  // Mirrors context_base/vfs.py l.97
+  return `company/reviews/conflicts/${reviewId.replace(/:/g, '-')}.md`;
+}
+
+/* ──────────────────────────────────────────────────────────────────── */
+/* Top-level component                                                   */
+/* ──────────────────────────────────────────────────────────────────── */
+
+export default function ReviewQueue({ onNavigateToEntity }: ReviewQueueProps) {
   const [reviews, setReviews] = useState<ReviewItem[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [resolving, setResolving] = useState(false);
   const [reviewedIds, setReviewedIds] = useState<Set<string>>(new Set());
+  const [sourcePanel, setSourcePanel] = useState<unknown | null>(null);
+  const [sourcePanelLoading, setSourcePanelLoading] = useState(false);
 
   const refresh = useCallback(async () => {
     setLoading(true);
@@ -120,7 +164,6 @@ export default function ReviewQueue() {
       try {
         await resolveReview(reviewId, choiceId);
         setReviewedIds((s) => new Set(s).add(reviewId));
-        // Optimistic: drop it from the local queue and step forward.
         const filtered = reviews.filter((r) => r.id !== reviewId);
         setReviews(filtered);
         const wasSelected = reviewId === selectedId;
@@ -140,7 +183,24 @@ export default function ReviewQueue() {
     [resolving, reviews, selectedId, selectedIndex]
   );
 
-  // Keyboard navigation: J/K through queue, A confirm top suggestion, S skip.
+  const openFactSource = useCallback(async (factId: string) => {
+    setSourcePanelLoading(true);
+    setError(null);
+    try {
+      const data = await fetchFactSources(factId);
+      // App.tsx uses data.fact for the inspector — fall back to the full
+      // payload so we surface whatever the backend returned.
+      setSourcePanel(data?.fact ?? data);
+    } catch (err) {
+      setError(
+        err instanceof Error ? err.message : 'Could not fetch source record.'
+      );
+    } finally {
+      setSourcePanelLoading(false);
+    }
+  }, []);
+
+  // Keyboard: J/K navigate, A confirm top, S skip.
   useEffect(() => {
     const isTyping = (e: KeyboardEvent) => {
       const t = e.target as HTMLElement | null;
@@ -165,7 +225,6 @@ export default function ReviewQueue() {
         e.preventDefault();
         advanceSelection();
       } else if ((e.key === 'a' || e.key === 'A') && selected) {
-        // Confirm the highest-confidence candidate.
         const cands = parseCandidates(selected.candidates_json);
         const top = [...cands].sort(
           (a, b) => (b.confidence ?? 0) - (a.confidence ?? 0)
@@ -255,25 +314,48 @@ export default function ReviewQueue() {
             review={selected}
             resolving={resolving}
             onResolve={handleResolve}
+            onOpenFactSource={openFactSource}
+            onNavigateToEntity={onNavigateToEntity}
           />
         )}
       </main>
+
+      {/* SHARED .source-panel drawer (same class as App.tsx fact-source panel) */}
+      {(sourcePanel || sourcePanelLoading) && (
+        <div className="source-panel">
+          <header>
+            <h3>Source record</h3>
+            <button className="btn-sm" onClick={() => setSourcePanel(null)}>
+              <X size={13} />
+            </button>
+          </header>
+          {sourcePanelLoading ? (
+            <div style={{ padding: 12, fontSize: 13, color: 'var(--muted)' }}>Loading…</div>
+          ) : (
+            <pre>{JSON.stringify(sourcePanel, null, 2)}</pre>
+          )}
+        </div>
+      )}
     </div>
   );
 }
 
-/* -------------------------------------------------------------------- */
+/* ──────────────────────────────────────────────────────────────────── */
 /* Detail panel                                                          */
-/* -------------------------------------------------------------------- */
+/* ──────────────────────────────────────────────────────────────────── */
 
 function ReviewDetail({
   review,
   resolving,
   onResolve,
+  onOpenFactSource,
+  onNavigateToEntity,
 }: {
   review: ReviewItem;
   resolving: boolean;
   onResolve: (reviewId: string, choiceId: string) => void;
+  onOpenFactSource: (factId: string) => void;
+  onNavigateToEntity?: (entityId: string) => void;
 }) {
   const candidates = useMemo(
     () => parseCandidates(review.candidates_json),
@@ -287,6 +369,8 @@ function ReviewDetail({
   const variant = sorted[1];
   const others = sorted.slice(2);
 
+  const reviewVfs = reviewVfsPath(review.id);
+
   return (
     <div className="rq-detail-inner">
       <header className="rq-detail-header">
@@ -299,7 +383,27 @@ function ReviewDetail({
           <span className="rq-meta-sep">·</span>
           <span>created {formatTimestamp(review.created_at)}</span>
         </div>
-        <h2 className="rq-detail-entity">{review.entity_id}</h2>
+
+        <h2 className="rq-detail-entity">
+          {onNavigateToEntity ? (
+            <button
+              className="rq-entity-link"
+              onClick={() => onNavigateToEntity(review.entity_id)}
+              title="Open this entity in the Context Browser"
+            >
+              {review.entity_id}
+              <ExternalLink size={13} />
+            </button>
+          ) : (
+            review.entity_id
+          )}
+        </h2>
+
+        <div className="rq-vfs-refs">
+          <span className="rq-vfs-ref-label">VFS</span>
+          <code className="rq-vfs-path">{reviewVfs}</code>
+        </div>
+
         {review.suggested_resolution && (
           <div className="rq-suggestion">
             <span className="rq-label">AI suggestion</span>
@@ -309,7 +413,7 @@ function ReviewDetail({
       </header>
 
       <div className="rq-section-label">
-        Conflicting values · clause {review.predicate}
+        Conflicting values · {review.predicate}
       </div>
 
       <div className="rq-cards-grid">
@@ -320,6 +424,7 @@ function ReviewDetail({
             predicate={review.predicate}
             disabled={resolving}
             onAccept={() => onResolve(review.id, anchor.choice_id)}
+            onOpenFactSource={onOpenFactSource}
           />
         )}
         {variant && (
@@ -329,6 +434,7 @@ function ReviewDetail({
             predicate={review.predicate}
             disabled={resolving}
             onAccept={() => onResolve(review.id, variant.choice_id)}
+            onOpenFactSource={onOpenFactSource}
           />
         )}
         {!anchor && !variant && (
@@ -340,26 +446,48 @@ function ReviewDetail({
         <>
           <div className="rq-section-label">Additional candidates</div>
           <div className="rq-others-list">
-            {others.map((c) => (
-              <div key={c.choice_id} className="rq-other-row">
-                <div>
-                  <div className="rq-other-value">
-                    {c.value || c.object_entity_id || '—'}
+            {others.map((c) => {
+              const src = parseSource(c.source);
+              return (
+                <div key={c.choice_id} className="rq-other-row">
+                  <div style={{ minWidth: 0, flex: 1 }}>
+                    <div className="rq-other-value">
+                      {c.value || c.object_entity_id || '—'}
+                    </div>
+                    <div className="rq-other-meta">
+                      {src ? (
+                        <>
+                          <code className="rq-vfs-path-inline">{src.datasetPath}</code>
+                          {src.recordId && (
+                            <span className="rq-record-pill">{src.recordId}</span>
+                          )}
+                          <span className="rq-meta-sep">·</span>
+                        </>
+                      ) : null}
+                      {Math.round((c.confidence ?? 0) * 100)}% confidence
+                      {c.fact_id && (
+                        <>
+                          <span className="rq-meta-sep">·</span>
+                          <button
+                            className="rq-link-btn"
+                            onClick={() => onOpenFactSource(c.fact_id as string)}
+                          >
+                            view source record
+                          </button>
+                        </>
+                      )}
+                    </div>
                   </div>
-                  <div className="rq-other-meta">
-                    {c.source_id ? `${c.source_id} · ` : ''}
-                    {Math.round((c.confidence ?? 0) * 100)}% confidence
-                  </div>
+                  <button
+                    className="btn-sm"
+                    disabled={resolving}
+                    onClick={() => onResolve(review.id, c.choice_id)}
+                  >
+                    Accept
+                  </button>
                 </div>
-                <button
-                  className="btn-sm"
-                  disabled={resolving}
-                  onClick={() => onResolve(review.id, c.choice_id)}
-                >
-                  Accept
-                </button>
-              </div>
-            ))}
+              );
+            })}
           </div>
         </>
       )}
@@ -367,9 +495,9 @@ function ReviewDetail({
   );
 }
 
-/* -------------------------------------------------------------------- */
+/* ──────────────────────────────────────────────────────────────────── */
 /* Source card — anchor (highest confidence) vs variant (second)        */
-/* -------------------------------------------------------------------- */
+/* ──────────────────────────────────────────────────────────────────── */
 
 function SourceCard({
   candidate,
@@ -377,21 +505,36 @@ function SourceCard({
   predicate,
   disabled,
   onAccept,
+  onOpenFactSource,
 }: {
   candidate: Candidate;
   role: 'anchor' | 'variant';
   predicate: string;
   disabled: boolean;
   onAccept: () => void;
+  onOpenFactSource: (factId: string) => void;
 }) {
   const confidence = Math.round((candidate.confidence ?? 0) * 100);
   const value = candidate.value || candidate.object_entity_id || '—';
+  const src = parseSource(candidate.source);
+
   return (
     <div className={`rq-card rq-card--${role}`}>
       <header className="rq-card-header">
         <div className="rq-card-source">
           <FileText size={12} />
-          <span>{candidate.source_id ?? candidate.choice_id}</span>
+          {src ? (
+            <>
+              <span className="rq-card-source-path" title={src.raw}>
+                {src.datasetPath}
+              </span>
+              {src.recordId && (
+                <span className="rq-record-pill">{src.recordId}</span>
+              )}
+            </>
+          ) : (
+            <span className="rq-card-source-path">{candidate.choice_id}</span>
+          )}
         </div>
         <span className={`rq-role-badge rq-role-${role}`}>
           {role === 'anchor' ? 'Highest confidence' : 'Variant'}
@@ -413,7 +556,20 @@ function SourceCard({
         )}
 
         <footer className="rq-card-foot">
-          <span className="rq-card-foot-meta">choice_id: {candidate.choice_id}</span>
+          <div className="rq-card-foot-meta-col">
+            <span className="rq-card-foot-meta">choice_id: {candidate.choice_id}</span>
+            {candidate.fact_id ? (
+              <button
+                className="rq-link-btn"
+                onClick={() => onOpenFactSource(candidate.fact_id as string)}
+                title="Open the underlying source record from the dataset"
+              >
+                <ExternalLink size={11} /> view source record
+              </button>
+            ) : src ? (
+              <span className="rq-card-foot-meta">no fact_id (synthesized)</span>
+            ) : null}
+          </div>
           <button
             className={`btn-sm ${role === 'anchor' ? 'btn-primary' : ''}`}
             disabled={disabled}

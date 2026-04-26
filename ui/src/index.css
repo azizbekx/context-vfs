@@ -1392,3 +1392,116 @@ textarea { height: auto; min-height: 64px; padding: 8px 10px; resize: vertical; 
   .rq-queue { width: 100%; max-height: 40vh; border-right: none; border-bottom: 1px solid var(--line); }
   .rq-detail-inner { padding: 16px; }
 }
+
+/* — Review queue: file reference additions (Phase 2) — */
+
+.rq-entity-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  background: transparent;
+  border: none;
+  padding: 0;
+  margin: 0;
+  font: inherit;
+  font-family: var(--mono);
+  color: var(--accent-dark);
+  font-weight: 600;
+  cursor: pointer;
+  text-decoration: none;
+}
+.rq-entity-link:hover {
+  color: var(--accent);
+  text-decoration: underline;
+}
+
+.rq-vfs-refs {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+  font-size: 11px;
+  flex-wrap: wrap;
+}
+.rq-vfs-ref-label {
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.rq-vfs-path,
+.rq-vfs-path-inline {
+  font-family: var(--mono);
+  font-size: 11px;
+  background: var(--line-soft);
+  border: 1px solid var(--line);
+  border-radius: 3px;
+  padding: 2px 6px;
+  color: var(--ink);
+  word-break: break-all;
+}
+.rq-vfs-path-inline {
+  display: inline-block;
+  background: transparent;
+  border: none;
+  padding: 0;
+  color: var(--muted);
+}
+
+.rq-record-pill {
+  display: inline-block;
+  padding: 1px 6px;
+  font-size: 10px;
+  font-family: var(--mono);
+  letter-spacing: 0.02em;
+  background: var(--accent-soft);
+  color: var(--accent-dark);
+  border-radius: 3px;
+  font-weight: 600;
+}
+.rq-card--variant .rq-record-pill {
+  background: rgba(245, 158, 11, 0.18);
+  color: #92400e;
+}
+
+.rq-card-source-path {
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--ink);
+  font-weight: 500;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+.rq-card--variant .rq-card-source-path {
+  color: #92400e;
+}
+
+.rq-link-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  background: transparent;
+  border: none;
+  padding: 0;
+  margin: 0;
+  font: inherit;
+  font-family: var(--font);
+  font-size: 11px;
+  color: var(--accent);
+  cursor: pointer;
+  text-decoration: none;
+}
+.rq-link-btn:hover {
+  color: var(--accent-dark);
+  text-decoration: underline;
+}
+
+.rq-card-foot-meta-col {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
