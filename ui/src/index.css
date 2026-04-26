@@ -1022,13 +1022,17 @@ textarea { height: auto; min-height: 64px; padding: 8px 10px; resize: vertical; 
    ════════════════════════════════════════════════════════════════════ */
 
 .rq-shell {
+  position: absolute;
+  inset: 0;
   display: flex;
-  flex: 1;
-  height: 100%;
-  min-height: 0;
   background: var(--bg);
   overflow: hidden;
 }
+/* Parent (.shell-body) supplies the positioning context. .shell-body is
+   already display:flex; flex:1; overflow:hidden — adding position:relative
+   at runtime via the wrapper means the viewport gets a hard frame around
+   the queue + detail, no matter how tall their inner content grows. */
+.shell-body { position: relative; }
 
 /* — Queue sidebar — */
 .rq-queue {

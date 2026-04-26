@@ -8,7 +8,7 @@ import {
   X,
   Save,
 } from 'lucide-react';
-import { fetchReviews, resolveReview, fetchFactSources, fetchEntity } from '../api';
+import { fetchReviews, resolveReview, fetchFactSources } from '../api';
 
 /**
  * Dedicated Review Queue page. Renders one row per open review_items
@@ -121,11 +121,9 @@ export default function ReviewQueue({ onNavigateToEntity }: ReviewQueueProps) {
   const [sourcePanel, setSourcePanel] = useState<unknown | null>(null);
   const [sourcePanelLoading, setSourcePanelLoading] = useState(false);
 
-  // Lazy caches keyed by id so re-selecting the same review is instant.
-  // The entity cache holds the full /entities/{id} payload (entity + facts +
-  // edges); the fact-source cache holds /facts/{id}/sources `fact` objects
-  // which carry the raw_json column from the dataset row.
-  const [entityCache, setEntityCache] = useState<Record<string, any>>({});
+  // Lazy cache keyed by fact_id so re-selecting a review hits the cache.
+  // Each value is the /facts/{id}/sources `fact` object, which carries
+  // the raw_json column from the dataset row.
   const [factSourceCache, setFactSourceCache] = useState<Record<string, any>>({});
 
   const refresh = useCallback(async () => {
@@ -243,17 +241,11 @@ export default function ReviewQueue({ onNavigateToEntity }: ReviewQueueProps) {
     return () => window.removeEventListener('keydown', onKey);
   }, [reviews, selectedIndex, selected, advanceSelection, handleResolve]);
 
-  // Lazy: when a review is selected, prefetch the entity + each candidate's
-  // fact source. Cached per id so re-selecting is instant. Fire-and-forget;
-  // any failure just leaves the cache empty and the UI shows a fallback.
+  // Lazy: when a review is selected, prefetch each candidate's fact source.
+  // Fire-and-forget; failure leaves the cache empty and the per-card preview
+  // shows a "loading" placeholder.
   useEffect(() => {
     if (!selected) return;
-    const eid = selected.entity_id;
-    if (!entityCache[eid]) {
-      fetchEntity(eid)
-        .then((data: any) => setEntityCache((c) => ({ ...c, [eid]: data })))
-        .catch(() => undefined);
-    }
     const cands = parseCandidates(selected.candidates_json);
     cands.forEach((c) => {
       if (c.fact_id && !factSourceCache[c.fact_id]) {
@@ -267,7 +259,7 @@ export default function ReviewQueue({ onNavigateToEntity }: ReviewQueueProps) {
           .catch(() => undefined);
       }
     });
-  }, [selected, entityCache, factSourceCache]);
+  }, [selected, factSourceCache]);
 
   return (
     <div className="rq-shell">
@@ -349,7 +341,6 @@ export default function ReviewQueue({ onNavigateToEntity }: ReviewQueueProps) {
             onResolve={handleResolve}
             onOpenFactSource={openFactSource}
             onNavigateToEntity={onNavigateToEntity}
-            entity={entityCache[selected.entity_id]}
             factSources={factSourceCache}
           />
         )}
@@ -385,7 +376,6 @@ function ReviewDetail({
   onResolve,
   onOpenFactSource,
   onNavigateToEntity,
-  entity,
   factSources,
 }: {
   review: ReviewItem;
@@ -393,7 +383,6 @@ function ReviewDetail({
   onResolve: (reviewId: string, choiceId: string) => void;
   onOpenFactSource: (factId: string) => void;
   onNavigateToEntity?: (entityId: string) => void;
-  entity?: any;
   factSources: Record<string, any>;
 }) {
   const candidates = useMemo(
@@ -451,15 +440,11 @@ function ReviewDetail({
         )}
       </header>
 
-      {/* Entity context — name, type, summary, top facts */}
-      {entity && <EntityContextBlock entity={entity} />}
-
-      {/* Inline diff bar — only when both sides parse as the same numeric */}
+      {/* Inline diff bar — one-liner, only when both sides parse as same numeric */}
       <InlineDiffBar a={anchor?.value} b={variant?.value} predicate={review.predicate} />
 
-      <div className="rq-section-label">
-        Conflicting values · {review.predicate}
-      </div>
+      {/* Cards are the hero — section label removed so they sit immediately
+          under the header. Per the latest brief: "die zwei kacheln oben". */}
 
       <div className="rq-cards-grid">
         {anchor && (
@@ -642,59 +627,6 @@ function SourceCard({
           </button>
         </footer>
       </div>
-    </div>
-  );
-}
-
-/* ──────────────────────────────────────────────────────────────────── */
-/* Entity context block — name, type, summary, top facts                */
-/* ──────────────────────────────────────────────────────────────────── */
-
-const PREFERRED_FACTS = [
-  'name', 'email', 'department', 'category', 'level', 'role', 'title',
-  'date_of_joining', 'reports_to', 'phone', 'identity', 'industry',
-];
-
-function EntityContextBlock({ entity }: { entity: any }) {
-  const e = entity?.entity;
-  const facts: any[] = entity?.facts ?? [];
-  if (!e) return null;
-
-  // Surface the most useful facts first; fall back to whatever order the
-  // backend returned for everything else.
-  const factByPredicate = new Map<string, any>();
-  facts.forEach((f) => {
-    if (!factByPredicate.has(f.predicate)) factByPredicate.set(f.predicate, f);
-  });
-  const ordered = [
-    ...PREFERRED_FACTS.filter((p) => factByPredicate.has(p)).map((p) => factByPredicate.get(p)),
-    ...facts.filter((f) => !PREFERRED_FACTS.includes(f.predicate)),
-  ].slice(0, 6);
-
-  const summary = (e.summary as string | undefined) ?? '';
-  const summaryShort = summary.length > 240 ? summary.slice(0, 240) + '…' : summary;
-
-  return (
-    <div className="rq-entity-context">
-      <div className="rq-entity-context-head">
-        <span className="rq-entity-context-name">{e.name ?? e.id}</span>
-        <span className="rq-entity-context-type">{e.type}</span>
-      </div>
-      {summaryShort && (
-        <div className="rq-entity-context-summary">{summaryShort}</div>
-      )}
-      {ordered.length > 0 && (
-        <div className="rq-entity-facts-grid">
-          {ordered.map((f) => (
-            <div key={f.id ?? f.predicate} style={{ display: 'contents' }}>
-              <span className="rq-entity-fact-key">{f.predicate}</span>
-              <span className="rq-entity-fact-val">
-                {String(f.value ?? f.object_entity_id ?? '—')}
-              </span>
-            </div>
-          ))}
-        </div>
-      )}
     </div>
   );
 }
