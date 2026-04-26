@@ -13,8 +13,8 @@ interface Stats {
 }
 
 const BAR_COLORS = [
-  '#0d9488', '#7c3aed', '#2563eb', '#16a34a', '#d97706',
-  '#e11d48', '#0891b2', '#9333ea', '#ca8a04', '#78716c',
+  '#10B981', '#A78BFA', '#60A5FA', '#4ADE80', '#FCD34D',
+  '#F87171', '#38BDF8', '#C084FC', '#FBBF24', '#94A3B8',
 ];
 
 function BarChart({ data, title }: { data: Record<string, number>; title: string }) {
@@ -66,11 +66,11 @@ export default function Dashboard() {
   );
 
   const cards = [
-    { label: 'Entities', value: stats.entities, Icon: Database, color: '#0d9488', soft: '#e6f4f1' },
-    { label: 'Facts', value: stats.facts, Icon: FileText, color: '#7c3aed', soft: '#ede9fe' },
-    { label: 'Edges', value: stats.edges, Icon: GitBranch, color: '#2563eb', soft: '#dbeafe' },
-    { label: 'Sources', value: stats.sources, Icon: Layers, color: '#16a34a', soft: '#dcfce7' },
-    { label: 'Open Reviews', value: stats.open_reviews, Icon: AlertTriangle, color: '#d97706', soft: '#fef3c7' },
+    { label: 'Entities', value: stats.entities, Icon: Database, color: '#10B981', soft: 'rgba(16,185,129,.12)' },
+    { label: 'Facts', value: stats.facts, Icon: FileText, color: '#A78BFA', soft: 'rgba(167,139,250,.12)' },
+    { label: 'Edges', value: stats.edges, Icon: GitBranch, color: '#60A5FA', soft: 'rgba(96,165,250,.12)' },
+    { label: 'Sources', value: stats.sources, Icon: Layers, color: '#4ADE80', soft: 'rgba(74,222,128,.12)' },
+    { label: 'Open Reviews', value: stats.open_reviews, Icon: AlertTriangle, color: '#FCD34D', soft: 'rgba(252,211,77,.12)' },
   ];
 
   return (
