@@ -8,7 +8,7 @@ import {
   X,
   Save,
 } from 'lucide-react';
-import { fetchReviews, resolveReview, fetchFactSources } from '../api';
+import { fetchReviews, resolveReview, fetchFactSources, fetchEntity } from '../api';
 
 /**
  * Dedicated Review Queue page. Renders one row per open review_items
@@ -107,6 +107,28 @@ function reviewVfsPath(reviewId: string): string {
   return `company/reviews/conflicts/${reviewId.replace(/:/g, '-')}.md`;
 }
 
+/**
+ * For synthesized candidates that don't have a fact_id of their own
+ * (e.g. ingest.py l.875 "investigate-resume" choice), fall back to
+ * any fact on the same entity that was extracted from the same source
+ * row. That fact's fact_id gives us a way to pull the dataset's
+ * raw_json so the variant card can show the same preview as the anchor.
+ */
+function resolveFactIdFromSource(
+  source: string | undefined,
+  entityFacts: any[] | undefined
+): string | null {
+  if (!source || !entityFacts) return null;
+  const idx = source.indexOf('#');
+  if (idx < 0) return null;
+  const path = source.slice(0, idx);
+  const recordId = source.slice(idx + 1);
+  const match = entityFacts.find(
+    (f) => f.dataset_path === path && f.record_id === recordId && f.id
+  );
+  return match?.id ?? null;
+}
+
 /* ──────────────────────────────────────────────────────────────────── */
 /* Top-level component                                                   */
 /* ──────────────────────────────────────────────────────────────────── */
@@ -121,9 +143,13 @@ export default function ReviewQueue({ onNavigateToEntity }: ReviewQueueProps) {
   const [sourcePanel, setSourcePanel] = useState<unknown | null>(null);
   const [sourcePanelLoading, setSourcePanelLoading] = useState(false);
 
-  // Lazy cache keyed by fact_id so re-selecting a review hits the cache.
-  // Each value is the /facts/{id}/sources `fact` object, which carries
-  // the raw_json column from the dataset row.
+  // Lazy caches keyed by id so re-selecting hits the cache.
+  // - entityCache: /entities/{id} payload (entity + facts + edges).
+  //   Not displayed in the UI — used internally to resolve a fallback
+  //   fact_id for synthesized candidates that have no fact_id of their own.
+  // - factSourceCache: /facts/{id}/sources `fact` objects, each carrying
+  //   the raw_json column from the dataset row that produced the value.
+  const [entityCache, setEntityCache] = useState<Record<string, any>>({});
   const [factSourceCache, setFactSourceCache] = useState<Record<string, any>>({});
 
   const refresh = useCallback(async () => {
@@ -241,25 +267,40 @@ export default function ReviewQueue({ onNavigateToEntity }: ReviewQueueProps) {
     return () => window.removeEventListener('keydown', onKey);
   }, [reviews, selectedIndex, selected, advanceSelection, handleResolve]);
 
-  // Lazy: when a review is selected, prefetch each candidate's fact source.
-  // Fire-and-forget; failure leaves the cache empty and the per-card preview
-  // shows a "loading" placeholder.
+  // Two-stage prefetch on review selection:
+  //   1. Fetch the entity (silently, used only to resolve fallback fact_ids
+  //      for synthesized candidates).
+  //   2. For each candidate — using the candidate's own fact_id when present,
+  //      or a fact_id from entity.facts matching the same dataset_path +
+  //      record_id when not — fetch /facts/{id}/sources so SourcePreview
+  //      can render the raw row from the dataset.
+  // Fire-and-forget; any failure just leaves the cache empty and the
+  // per-card preview shows its "loading" placeholder until the fetch lands.
   useEffect(() => {
     if (!selected) return;
+    const eid = selected.entity_id;
+    if (!entityCache[eid]) {
+      fetchEntity(eid)
+        .then((data: any) => setEntityCache((c) => ({ ...c, [eid]: data })))
+        .catch(() => undefined);
+      return;
+    }
+    const entity = entityCache[eid];
     const cands = parseCandidates(selected.candidates_json);
     cands.forEach((c) => {
-      if (c.fact_id && !factSourceCache[c.fact_id]) {
-        fetchFactSources(c.fact_id)
+      const factId = c.fact_id ?? resolveFactIdFromSource(c.source, entity?.facts);
+      if (factId && !factSourceCache[factId]) {
+        fetchFactSources(factId)
           .then((data: any) =>
             setFactSourceCache((cache) => ({
               ...cache,
-              [c.fact_id as string]: data?.fact ?? data,
+              [factId]: data?.fact ?? data,
             }))
           )
           .catch(() => undefined);
       }
     });
-  }, [selected, factSourceCache]);
+  }, [selected, entityCache, factSourceCache]);
 
   return (
     <div className="rq-shell">
@@ -342,6 +383,7 @@ export default function ReviewQueue({ onNavigateToEntity }: ReviewQueueProps) {
             onOpenFactSource={openFactSource}
             onNavigateToEntity={onNavigateToEntity}
             factSources={factSourceCache}
+            entityFacts={entityCache[selected.entity_id]?.facts}
           />
         )}
       </main>
@@ -377,6 +419,7 @@ function ReviewDetail({
   onOpenFactSource,
   onNavigateToEntity,
   factSources,
+  entityFacts,
 }: {
   review: ReviewItem;
   resolving: boolean;
@@ -384,6 +427,7 @@ function ReviewDetail({
   onOpenFactSource: (factId: string) => void;
   onNavigateToEntity?: (entityId: string) => void;
   factSources: Record<string, any>;
+  entityFacts?: any[];
 }) {
   const candidates = useMemo(
     () => parseCandidates(review.candidates_json),
@@ -455,7 +499,10 @@ function ReviewDetail({
             disabled={resolving}
             onAccept={() => onResolve(review.id, anchor.choice_id)}
             onOpenFactSource={onOpenFactSource}
-            factSource={anchor.fact_id ? factSources[anchor.fact_id] : undefined}
+            effectiveFactId={
+              anchor.fact_id ?? resolveFactIdFromSource(anchor.source, entityFacts)
+            }
+            factSources={factSources}
           />
         )}
         {variant && (
@@ -466,7 +513,10 @@ function ReviewDetail({
             disabled={resolving}
             onAccept={() => onResolve(review.id, variant.choice_id)}
             onOpenFactSource={onOpenFactSource}
-            factSource={variant.fact_id ? factSources[variant.fact_id] : undefined}
+            effectiveFactId={
+              variant.fact_id ?? resolveFactIdFromSource(variant.source, entityFacts)
+            }
+            factSources={factSources}
           />
         )}
         {!anchor && !variant && (
@@ -538,7 +588,8 @@ function SourceCard({
   disabled,
   onAccept,
   onOpenFactSource,
-  factSource,
+  effectiveFactId,
+  factSources,
 }: {
   candidate: Candidate;
   role: 'anchor' | 'variant';
@@ -546,11 +597,16 @@ function SourceCard({
   disabled: boolean;
   onAccept: () => void;
   onOpenFactSource: (factId: string) => void;
-  factSource?: any;
+  /** The fact_id we should use to fetch the source record. Either the
+   *  candidate's own fact_id or, when synthesized, a fallback from
+   *  entity.facts matching the same dataset_path + record_id. */
+  effectiveFactId: string | null;
+  factSources: Record<string, any>;
 }) {
   const confidence = Math.round((candidate.confidence ?? 0) * 100);
   const value = candidate.value || candidate.object_entity_id || '—';
   const src = parseSource(candidate.source);
+  const factSource = effectiveFactId ? factSources[effectiveFactId] : undefined;
   const ingestedAt = factSource?.updated_at as string | undefined;
 
   return (
@@ -590,10 +646,12 @@ function SourceCard({
           </div>
         )}
 
-        {/* File preview — raw_json record fields lazy-loaded via fetchFactSources */}
-        {candidate.fact_id && (
+        {/* File preview — raw_json record fields lazy-loaded via fetchFactSources.
+            Rendered for every card that has a source path (anchor with own
+            fact_id, variant fallback to a sibling fact on the same source row). */}
+        {effectiveFactId && (
           <SourcePreview
-            factId={candidate.fact_id}
+            factId={effectiveFactId}
             factSource={factSource}
             highlightField={predicate}
           />
@@ -606,16 +664,16 @@ function SourceCard({
         <footer className="rq-card-foot">
           <div className="rq-card-foot-meta-col">
             <span className="rq-card-foot-meta">choice_id: {candidate.choice_id}</span>
-            {candidate.fact_id ? (
+            {effectiveFactId ? (
               <button
                 className="rq-link-btn"
-                onClick={() => onOpenFactSource(candidate.fact_id as string)}
+                onClick={() => onOpenFactSource(effectiveFactId)}
                 title="Open the underlying source record from the dataset"
               >
                 <ExternalLink size={11} /> view source record
               </button>
             ) : src ? (
-              <span className="rq-card-foot-meta">no fact_id (synthesized)</span>
+              <span className="rq-card-foot-meta">no fact on file for this row</span>
             ) : null}
           </div>
           <button
