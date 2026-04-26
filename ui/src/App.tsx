@@ -137,7 +137,7 @@ export default function App() {
       </header>
 
       <div className="shell-body">
-        {view === 'dashboard' ? <Dashboard /> : view === 'reviews' ? <ReviewQueue /> : (
+        {view === 'dashboard' ? <Dashboard /> : view === 'reviews' ? <ReviewQueue onNavigateToEntity={(id) => { setView('browser'); loadEntity(id); }} /> : (
           <div className="layout-3col">
             {/* Sidebar */}
             <aside className="col-sidebar">
